@@ -1,0 +1,14 @@
+# Core ML / vector search
+sentence-transformers>=2.7.0
+faiss-cpu>=1.8.0
+
+# Web framework
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
+
+# Utilities
+numpy>=1.26.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.2.0

@@ -1,0 +1,9 @@
+# Scraper dependencies
+# Install with: pip install -r scripts/requirements-scraper.txt
+
+# HTML parsing
+beautifulsoup4>=4.12.0
+lxml>=5.2.0          # faster parser than html.parser
+
+# HTTP (usually already installed)
+requests>=2.32.0

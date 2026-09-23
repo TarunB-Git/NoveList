@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Search a local novel catalogue, track reading progress, build tier lists, and review tentative placements shaped by your ratings.">
+  <meta name="theme-color" content="#111512">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="NoveList | A living record of what you read">
+  <meta property="og:description" content="Catalogue novels, track reading states, and shape a tier list that learns from your choices.">
+  <meta id="og-image" property="og:image" content="/social-card.svg">
+  <meta name="twitter:card" content="summary_large_image">
+  <title>NoveList | Discover and rank novels</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[
+    {"@type":"Question","name":"How are novels ranked?","acceptedAnswer":{"@type":"Answer","text":"New saves receive a tentative tier based on ratings, direct placements, matching tags, and reading state. Rating, moving, or confirming a title updates future suggestions."}},
+    {"@type":"Question","name":"Where is reading data stored?","acceptedAnswer":{"@type":"Answer","text":"Accounts, reading states, tier placements, reviews, and collections are stored by the local NoveList service."}},
+    {"@type":"Question","name":"Can I import an existing reading list?","acceptedAnswer":{"@type":"Answer","text":"Yes. Signed-in readers can import a CSV containing a title column and an optional status column."}}
+  ]}
+  </script>
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <header class="site-header">
+    <a class="brand" href="#discover" aria-label="NoveList home">nove<span>list</span></a>
+    <div class="header-actions">
+      <button id="theme" class="icon-button" type="button" aria-label="Toggle colour theme">Dark</button>
+      <button id="auth" class="outline-button" type="button">Sign in</button>
+    </div>
+  </header>
+
+  <main id="content" class="page-shell">
+    <div class="search-intro">
+      <p class="eyebrow">Discover · Save · Rank</p>
+      <h1>Find a story that stays with you.</h1>
+      <p>Search novels by title, author, tag, or premise. Keep your reading list and personal tier list in one place.</p>
+    </div>
+    <div id="discover-search" class="search-bar">
+      <label class="search-input"><span class="sr-only">Search catalogue</span><input id="query" type="search" autocomplete="off" placeholder="Search titles, authors, or story ideas"></label>
+      <button id="search" class="primary-button" type="button">Search</button>
+      <button id="open-filters" class="outline-button" type="button" aria-haspopup="dialog" aria-controls="tag-dialog" aria-expanded="false">Filters <span id="filter-count"></span></button>
+    </div>
+    <nav class="primary-nav" aria-label="Primary navigation">
+      <a href="#discover" data-nav="discover">Discover</a>
+      <a href="#library" data-nav="library">Library</a>
+      <a href="#tiers" data-nav="tiers">Tier list</a>
+      <a href="#community" data-nav="community">Community</a>
+      <a href="#account" data-nav="account">Profile</a>
+      <a href="#admin" data-nav="admin" id="admin-nav" hidden>Admin</a>
+    </nav>
+    <div id="notice" class="notice" role="status" aria-live="polite"></div>
+    <div id="selected-tags" class="selected-tags" aria-label="Selected tag filters"></div>
+
+    <section id="discover" class="view active" data-title="Discover novels">
+      <dialog id="tag-dialog" class="filter-dialog" aria-labelledby="tag-filter-title">
+        <div class="filter-heading"><h2 id="tag-filter-title">Filter by tags</h2><button id="close-filters" class="icon-button" type="button" aria-label="Close filters">×</button></div>
+        <p>Choose tags to narrow results. A novel must have every selected tag.</p>
+        <label class="tag-search">Find a tag<input id="tag-query" type="search" placeholder="Try cultivation" maxlength="80"></label>
+        <p id="tag-summary" class="subtle" role="status"></p>
+        <div id="tag-cloud" class="tag-cloud"><span class="subtle">Loading tags</span></div>
+        <div class="filter-actions"><button id="clear-tags" class="text-button" type="button">Clear tags</button><button id="apply-filters" class="primary-button" type="button">Show results</button></div>
+      </dialog>
+      <div class="discover-layout">
+        <div class="catalogue-panel">
+          <div class="results-toolbar">
+            <div><h2 id="results-title">Latest in the catalogue</h2><p id="results-count" class="subtle"></p></div>
+            <div class="toolbar-controls">
+              <div id="result-view" class="segmented" aria-label="Result layout">
+                <button data-result-layout="list" type="button">List</button>
+                <button data-result-layout="grid" type="button">Grid</button>
+                <button data-result-layout="dense" type="button">Compact</button>
+              </div>
+              <label class="sort-control">Sort<select id="result-sort"><option value="relevance">Relevance</option><option value="recent">Newest</option><option value="title">Title A to Z</option><option value="random">Shuffle</option></select></label>
+            </div>
+          </div>
+          <div id="results" class="results" aria-live="polite"><div class="skeleton-grid"><div></div><div></div><div></div></div></div>
+          <div class="pagination"><button id="load-more" class="outline-button" type="button" hidden>Load more</button><span id="catalogue-end" class="subtle"></span></div>
+          <div id="scroll-sentinel" aria-hidden="true"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="library" class="view" data-title="Your library">
+      <div class="section-heading"><div><p class="eyebrow">Personal catalogue</p><h1>Library</h1><p>Keep reading states current and review every tentative tier placement.</p></div><div id="filters" class="status-filters"></div></div>
+      <div id="books" class="library-grid"><div class="empty">Sign in to view your library.</div></div>
+    </section>
+
+    <section id="tiers" class="view" data-title="Your tier list">
+      <div class="section-heading"><div><p class="eyebrow">Taste model</p><h1>Tier list</h1><p>Drag titles between rows or reorder within a row. Every direct move becomes ranking feedback.</p></div><div id="tier-view" class="segmented"><button data-display="title" type="button">Titles</button><button data-display="cover" type="button">Covers</button></div></div>
+      <div id="tierboard" class="tierboard"><div class="empty">Sign in to arrange your tier list.</div></div>
+    </section>
+
+    <section id="models" class="view" data-title="Search and tier placement">
+      <div class="section-heading"><div><p class="eyebrow">Two engines, one catalogue</p><h1>Models</h1><p>Catalogue search and tentative tiers use separate signals.</p></div><div id="model-catalogue-size" class="subtle"></div></div>
+      <div class="model-map" aria-label="Search and tier placement flow">
+        <article class="model-panel search-model">
+          <div class="model-orbit"><span>384</span><small>dimensions</small></div>
+          <p class="eyebrow">Shared search engine</p><h2>Meaning and metadata</h2>
+          <div class="model-flow"><span>Query</span><i></i><span>Embedding</span><i></i><span>Vector + lexical rank</span><i></i><span>Results</span></div>
+          <div class="model-update"><strong>Update</strong><span>Catalogue metadata</span><b>Build index</b></div>
+        </article>
+        <article class="model-panel taste-model">
+          <div class="taste-radar" aria-hidden="true"><i></i><i></i><i></i><span></span></div>
+          <p class="eyebrow">Personal tier placement predictor</p><h2>Taste and intent</h2>
+          <div class="model-flow"><span>Rating</span><span>Tier move</span><span>Status</span><i></i><span>Tag weights</span><i></i><span>Tentative tier</span></div>
+          <div class="model-update"><strong>Update</strong><span>Rate, move, or confirm</span><b>Updates instantly</b></div>
+        </article>
+      </div>
+      <div class="model-legend"><span><i class="shared-dot"></i>One search index for the catalogue</span><span><i class="private-dot"></i>One taste profile per reader</span></div>
+    </section>
+
+    <section id="analytics" class="view" data-title="Reading analytics">
+      <div class="section-heading"><div><p class="eyebrow">Reading patterns</p><h1>Analytics</h1><p>A visual summary of your library, progress, taste signals, and local footprint.</p></div><div id="storage" class="subtle"></div></div>
+      <div id="analytics-content"><div class="empty">Sign in to view reader analytics.</div></div>
+    </section>
+
+    <section id="community" class="view" data-title="Community collections">
+      <div class="section-heading"><div><p class="eyebrow">Shared taste</p><h1>Community</h1><p>Build themed collections, follow tier lists, and talk about the novels in them.</p></div></div>
+      <div class="split-layout">
+        <form id="collection-form" class="form-panel">
+          <h2>Create a collection</h2>
+          <label>Name<input id="collection-name" required maxlength="80" placeholder="Nostalgia"></label>
+          <label>Description<textarea id="collection-description" maxlength="500" placeholder="The stories that made reading feel endless"></textarea></label>
+          <button class="primary-button" type="submit">Create collection</button>
+          <div class="form-divider"></div>
+          <h2>Missing a novel?</h2>
+          <label>Title<input id="request-title" maxlength="300" placeholder="Request a catalogue addition"></label>
+          <button id="request-novel" class="outline-button" type="button">Send request</button>
+        </form>
+        <div id="shared-collections" class="collection-list"><div class="skeleton wide"></div></div>
+      </div>
+    </section>
+
+    <section id="account" class="view" data-title="Reader profile">
+      <div class="section-heading"><div><p class="eyebrow">Identity and security</p><h1>Profile</h1><p>Your public reading summary and private account controls are kept separate.</p></div></div>
+      <div id="account-summary" class="profile-summary"><div class="empty">Sign in to view your profile.</div></div>
+      <div id="account-controls" class="account-panels">
+        <form id="password-form" class="form-panel"><h2>Change password</h2><label>Current password<input id="current-password" required type="password" autocomplete="current-password"></label><label>New password<input id="new-password" required minlength="10" type="password" autocomplete="new-password"></label><button class="outline-button" type="submit">Update password</button></form>
+        <div class="form-panel"><h2>Import reading list</h2><p>Upload a CSV with a <code>title</code> column and optional <code>status</code> column. Titles and known aliases are matched.</p><label>CSV reading list<input id="library-import-file" type="file" accept=".csv,text/csv"></label><button id="import-library" class="outline-button" type="button">Import CSV</button><div class="form-divider"></div><button id="logout" class="outline-button" type="button">Sign out on this device</button></div>
+        <div class="form-panel"><h2>Account recovery</h2><p>Replace your one-time recovery code. The previous code stops working immediately.</p><button id="rotate-recovery" class="outline-button" type="button">Create recovery code</button></div>
+      </div>
+    </section>
+
+    <section id="admin" class="view" data-title="Catalogue administration" hidden>
+      <div class="section-heading"><div><p class="eyebrow">Metadata operations</p><h1>Catalogue ingestion</h1><p>Collection jobs rotate through later pages, skip complete records, and revisit incomplete metadata.</p></div></div>
+      <div class="admin-grid">
+        <form id="direct-form" class="form-panel"><h2>Find an exact title</h2><p>Search all configured providers. Matching series titles are collected with it when a series page is available.</p><label>Novel title<input id="direct-title" required maxlength="300" placeholder="Exact or translated title"></label><button class="primary-button" type="submit">Find and add</button></form>
+        <form id="scrape-form" class="form-panel"><h2>Expand or repair the catalogue</h2><label>Operation<select id="scrape-source"><option value="repair">Repair missing covers, authors, and descriptions</option><option value="royalroad">Royal Road, continue later pages</option><option value="novelfire">NovelFire xianxia and xuanhuan</option><option value="novelfull">NovelFull xianxia and xuanhuan</option><option value="novelupdates">Novel Updates xianxia and xuanhuan</option></select></label><label>Maximum records<input id="scrape-limit" type="number" min="1" max="200" value="20"></label><button class="outline-button" type="submit">Start collection</button></form>
+        <form id="custom-scrape-form" class="form-panel"><h2>Add from a metadata page</h2><label>Public page URL<input id="custom-source-url" required type="url" maxlength="2000" placeholder="https://publisher.example/book"></label><button class="outline-button" type="submit">Collect page</button></form>
+        <form id="catalogue-editor" class="form-panel catalogue-editor"><div class="editor-heading"><h2>Edit catalogue record</h2><span id="editor-record-id">New record</span></div><label>Title<input id="editor-title" required maxlength="300"></label><label>Aliases<textarea id="editor-aliases" placeholder="One title per line"></textarea></label><label>Author<input id="editor-author" maxlength="300"></label><label>Description<textarea id="editor-synopsis" maxlength="20000"></textarea></label><div class="editor-columns"><label>Tags<input id="editor-tags" placeholder="fantasy, cultivation"></label><label>Publication status<input id="editor-status" maxlength="80"></label><label>Source label<input id="editor-source" maxlength="120"></label><label>Cover URL<input id="editor-cover" type="url" maxlength="2000"></label></div><label>Source links<textarea id="editor-links" placeholder="Publisher | https://example.com/book"></textarea></label><div class="collection-actions"><button class="primary-button" type="submit">Save record</button><button id="editor-reset" class="outline-button" type="button">New record</button></div></form>
+      </div>
+      <div id="scrape-jobs" class="jobs-panel"></div>
+    </section>
+
+    <section id="faq" class="view faq" data-title="Frequently asked questions" aria-labelledby="faq-title">
+      <p class="eyebrow">Questions</p><h2 id="faq-title">How NoveList works</h2>
+      <div class="faq-grid">
+        <details><summary>How are tentative tiers chosen?</summary><p>Direct placements and ratings establish your baseline. Shared tags and the title’s reading state adjust that estimate. Dropped titles start conservatively.</p></details>
+        <details><summary>What teaches the ranking model?</summary><p>Rating, dragging, assigning a tier, or confirming a suggestion records feedback. Later predictions use those choices, with more weight on completed and dropped titles.</p></details>
+        <details><summary>Why might a cover be missing?</summary><p>A source may not publish one, may block hotlinking, or may have moved the image. NoveList tries its local cache, a safe proxy, and the source URL before showing a placeholder.</p></details>
+        <details><summary>Can readers add novels?</summary><p>Readers can request a title. Administrators can run exact-title discovery or broader collection jobs so the shared catalogue stays controlled and deduplicated.</p></details>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer"><a class="brand" href="#discover">nove<span>list</span></a><nav><a href="#discover">Discover</a><a href="#library">Library</a><a href="#tiers">Tier list</a><a href="#models">Models</a><a href="#analytics">Analytics</a><a href="#community">Community</a><a href="#account">Profile</a><a href="#faq">FAQ</a></nav><p>Reading data stays with this service.</p></footer>
+
+  <div id="login-modal" class="modal" aria-hidden="true"><form id="login-form" class="modal-panel"><button id="close-login" type="button" class="modal-close" aria-label="Close">×</button><p class="eyebrow">Your NoveList</p><h2>Sign in or create an account</h2><p id="auth-message" class="form-message" role="status"></p><label>Username<input id="username" required minlength="3" maxlength="32" autocomplete="username"></label><label>Password<input id="password" required maxlength="256" type="password" autocomplete="current-password"></label><button id="sign-in" class="primary-button" type="submit">Sign in</button><button id="register" class="outline-button" type="button">Create account</button><button id="open-reset" class="text-button" type="button">Forgot password?</button></form></div>
+  <div id="reset-modal" class="modal" aria-hidden="true"><form id="reset-form" class="modal-panel"><button id="close-reset" type="button" class="modal-close" aria-label="Close">×</button><p class="eyebrow">Account recovery</p><h2>Reset password</h2><p id="reset-message" class="form-message" role="status">Use the recovery code issued when the account was created or last rotated.</p><label>Username<input id="reset-username" required minlength="3" maxlength="32" autocomplete="username"></label><label>Recovery code<input id="reset-code" required minlength="16" maxlength="128" autocomplete="off"></label><label>New password<input id="reset-password" required minlength="10" maxlength="256" type="password" autocomplete="new-password"></label><button class="primary-button" type="submit">Reset password</button></form></div>
+  <div id="recovery-modal" class="modal" aria-hidden="true"><div class="modal-panel"><button id="close-recovery" type="button" class="modal-close" aria-label="Close">×</button><p class="eyebrow">One-time recovery</p><h2>Save this code</h2><p id="recovery-lead" class="subtle"></p><code id="recovery-code" class="recovery-code"></code><button id="copy-recovery" class="outline-button" type="button">Copy code</button></div></div>
+  <div id="review-modal" class="modal" aria-hidden="true"><div class="modal-panel discussion"><button id="close-reviews" type="button" class="modal-close" aria-label="Close">×</button><h2 id="review-title">Reviews</h2><div id="review-list" class="discussion-list"></div><form id="review-form"><label>Rating<select id="review-rating"><option value="">No rating</option><option value="5">5, loved it</option><option value="4">4, liked it</option><option value="3">3, mixed</option><option value="2">2, disliked it</option><option value="1">1, hated it</option></select></label><label>Review<textarea id="review-body" required maxlength="2000"></textarea></label><button class="primary-button" type="submit">Post review</button></form></div></div>
+  <div id="collection-modal" class="modal" aria-hidden="true"><div class="modal-panel collection-detail"><button id="close-collection" type="button" class="modal-close" aria-label="Close">×</button><div id="collection-detail"></div></div></div>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

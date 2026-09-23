@@ -1,0 +1,7 @@
+cff-version: 1.2.0
+message: "If you use NoveList in a publication, please cite this software."
+title: NoveList
+authors:
+  - family-names: Boddeda
+    given-names: Tarun
+license: Apache-2.0
