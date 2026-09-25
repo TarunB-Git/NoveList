@@ -14,7 +14,7 @@ const VIEW_TITLES = {
   discover: "Discover novels",
   library: "Your library",
   tiers: "Your tier list",
-  models: "What is NoveList?",
+  models: "How NoveList works",
   analytics: "Reading analytics",
   community: "Community collections",
   account: "Reader profile",
@@ -25,7 +25,7 @@ const VIEW_DESCRIPTIONS = {
   discover: "Search and filter the NoveList catalogue by title, author, premise, and exact tags.",
   library: "Manage saved novels and keep every reading state current.",
   tiers: "Edit a personal novel tier list and refine future tentative placements.",
-  models: "Learn how local semantic search and personal tier suggestions work.",
+  models: "See how catalogue search and personal tier suggestions work.",
   analytics: "Explore reading-state, ranking, taste, activity, and storage analytics.",
   community: "Follow reader tier lists, publish collections, reviews, and comments.",
   account: "View your reader profile, import a library, and manage account security.",
@@ -173,8 +173,11 @@ function currentView() {
 
 function showView(viewName = currentView()) {
   if (viewName === "admin" && state.user?.role !== "admin") viewName = "discover";
+  const previousView = document.body.dataset.view;
   $$(".view").forEach((view) => view.classList.toggle("active", view.id === viewName));
   $$("[data-nav]").forEach((link) => link.classList.toggle("active", link.dataset.nav === viewName));
+  document.body.dataset.view = viewName;
+  if (previousView && previousView !== viewName) window.scrollTo(0, 0);
   document.title = `${VIEW_TITLES[viewName]} | NoveList`;
   $('meta[name="description"]').setAttribute("content", VIEW_DESCRIPTIONS[viewName]);
   $('meta[property="og:title"]').setAttribute("content", `${VIEW_TITLES[viewName]} | NoveList`);
@@ -208,7 +211,6 @@ async function refreshCatalogueStats() {
     const data = await request("/catalogue/stats");
     state.catalogueTotal = data.novels;
     updatePreview(data);
-    if ($("#model-catalogue-size")) $("#model-catalogue-size").textContent = `${data.novels.toLocaleString()} ${data.limited ? "preview " : ""}records`;
   } catch {
     setNotice("Catalogue statistics are unavailable.", true);
   }

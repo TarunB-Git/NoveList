@@ -12,7 +12,7 @@
   <meta name="twitter:card" content="summary_large_image">
   <title>NoveList | Discover and rank novels</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=2">
+  <link rel="stylesheet" href="/styles.css?v=3">
   <script type="application/ld+json">
   {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[
     {"@type":"Question","name":"How are novels ranked?","acceptedAnswer":{"@type":"Answer","text":"New saves receive a tentative tier based on ratings, direct placements, matching tags, and reading state. Rating, moving, or confirming a title updates future suggestions."}},
@@ -95,27 +95,31 @@
       <div id="tierboard" class="tierboard"><div class="empty">Sign in to arrange your tier list.</div></div>
     </section>
 
-    <section id="models" class="view" data-title="Search and tier placement">
-      <div class="section-heading"><div><p class="eyebrow">Behind the product</p><h1>What is NoveList?</h1><p>A searchable catalogue and a personal reading workspace. Search helps you find records; tier suggestions help you organize books you have saved.</p></div><div id="model-catalogue-size" class="subtle"></div></div>
-      <div class="model-map" aria-label="Search and tier placement flow">
-        <article class="model-panel search-model">
-          <div class="model-orbit"><span>384</span><small>dimensions</small></div>
-          <p class="eyebrow">Shared search engine</p><h2>Meaning and metadata</h2>
-          <div class="model-flow"><span>Query</span><i></i><span>Embedding</span><i></i><span>Vector + lexical rank</span><i></i><span>Results</span></div>
-          <div class="model-update"><strong>Update</strong><span>Catalogue metadata</span><b>Build index</b></div>
-        </article>
-        <article class="model-panel taste-model">
-          <div class="taste-radar" aria-hidden="true"><i></i><i></i><i></i><span></span></div>
-          <p class="eyebrow">Personal tier placement predictor</p><h2>Taste and intent</h2>
-          <div class="model-flow"><span>Rating</span><span>Tier move</span><span>Status</span><i></i><span>Tag weights</span><i></i><span>Tentative tier</span></div>
-          <div class="model-update"><strong>Update</strong><span>Rate, move, or confirm</span><b>Updates instantly</b></div>
-        </article>
+    <section id="models" class="view how-page" data-title="How NoveList works" aria-labelledby="how-title">
+      <header class="how-intro">
+        <p class="eyebrow">Inside NoveList</p>
+        <h1 id="how-title">From a search to your own tier list.</h1>
+        <p>Catalogue search finds stories. Your reading history shapes tentative placements for the books you save.</p>
+      </header>
+
+      <div class="how-section">
+        <div class="how-section-heading"><span class="how-index" aria-hidden="true">01</span><div><p class="eyebrow">Explore</p><h2>Find a book</h2></div></div>
+        <ol class="how-steps">
+          <li><span class="how-step-number" aria-hidden="true">1</span><div><h3>Build the catalogue index</h3><p>Titles, aliases, authors, descriptions, and tags become searchable records. The local sentence encoder turns each record into a 384-number vector.</p></div></li>
+          <li><span class="how-step-number" aria-hidden="true">2</span><div><h3>Search by words or meaning</h3><p>The same encoder processes your query. FAISS finds nearby vectors while exact titles and matching metadata contribute keyword signals.</p></div></li>
+          <li><span class="how-step-number" aria-hidden="true">3</span><div><h3>Narrow the results</h3><p>Selected tags filter the ranked results. Guests see the catalogue preview; signing in opens the full collection.</p></div></li>
+        </ol>
+        <p class="how-detail"><strong>Search model</strong> all-MiniLM-L6-v2 runs in this service. The search index is rebuilt when catalogue metadata changes.</p>
       </div>
-      <div class="model-legend"><span><i class="shared-dot"></i>One search index for the catalogue</span><span><i class="private-dot"></i>Personal feedback from each reader</span></div>
-      <div class="architecture-notes">
-        <article><h3>How search works</h3><p>The local all-MiniLM-L6-v2 sentence encoder turns catalogue text and a query into 384-number vectors. FAISS compares normalized vectors, then lexical title, alias, author, and tag matches influence the result order. Exact tag filters narrow the result set. This encoder is not a text-generating LLM.</p></article>
-        <article><h3>How tiers adapt</h3><p>Each reader's ratings and chosen or confirmed tiers form a weighted baseline. Matching tags and reading state adjust a saved title's tentative tier. When you rate or move a book, NoveList recalculates only your still-tentative placements. Your direct choices stay yours.</p></article>
-        <article><h3>What the system does not claim</h3><p>It does not train a new neural model for each reader or recommend unseen books. There is no judged search evaluation yet, so match scores and tier suggestions are aids to exploration, not measured predictions of what you will enjoy.</p></article>
+
+      <div class="how-section">
+        <div class="how-section-heading"><span class="how-index" aria-hidden="true">02</span><div><p class="eyebrow">Organize</p><h2>Make the list yours</h2></div></div>
+        <ol class="how-steps">
+          <li><span class="how-step-number" aria-hidden="true">1</span><div><h3>Save what you read</h3><p>Reading status, ratings, and tier choices are stored in your account's library.</p></div></li>
+          <li><span class="how-step-number" aria-hidden="true">2</span><div><h3>Get a tentative tier</h3><p>Your ratings and direct tier placements form a weighted baseline. Books sharing tags with those choices draw on those signals; reading status adjusts their weight.</p></div></li>
+          <li><span class="how-step-number" aria-hidden="true">3</span><div><h3>Refine it by moving books</h3><p>Moving, rating, or confirming a book adds feedback. Your chosen tiers stay in place while tentative placements for saved books update.</p></div></li>
+        </ol>
+        <p class="how-detail"><strong>Tier logic</strong> A deterministic calculation in your library, specific to your own reading history.</p>
       </div>
     </section>
 
@@ -181,6 +185,6 @@
   <div id="review-modal" class="modal" aria-hidden="true"><div class="modal-panel discussion"><button id="close-reviews" type="button" class="modal-close" aria-label="Close">×</button><h2 id="review-title">Reviews</h2><div id="review-list" class="discussion-list"></div><form id="review-form"><label>Rating<select id="review-rating"><option value="">No rating</option><option value="5">5, loved it</option><option value="4">4, liked it</option><option value="3">3, mixed</option><option value="2">2, disliked it</option><option value="1">1, hated it</option></select></label><label>Review<textarea id="review-body" required maxlength="2000"></textarea></label><button class="primary-button" type="submit">Post review</button></form></div></div>
   <div id="collection-modal" class="modal" aria-hidden="true"><div class="modal-panel collection-detail"><button id="close-collection" type="button" class="modal-close" aria-label="Close">×</button><div id="collection-detail"></div></div></div>
 
-  <script src="/app.js?v=2" defer></script>
+  <script src="/app.js?v=3" defer></script>
 </body>
 </html>
