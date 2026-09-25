@@ -14,7 +14,7 @@ const VIEW_TITLES = {
   discover: "Discover novels",
   library: "Your library",
   tiers: "Your tier list",
-  models: "Search and tier placement",
+  models: "What is NoveList?",
   analytics: "Reading analytics",
   community: "Community collections",
   account: "Reader profile",
@@ -25,7 +25,7 @@ const VIEW_DESCRIPTIONS = {
   discover: "Search and filter the NoveList catalogue by title, author, premise, and exact tags.",
   library: "Manage saved novels and keep every reading state current.",
   tiers: "Edit a personal novel tier list and refine future tentative placements.",
-  models: "See how catalogue search and tentative tier placements work.",
+  models: "Learn how local semantic search and personal tier suggestions work.",
   analytics: "Explore reading-state, ranking, taste, activity, and storage analytics.",
   community: "Follow reader tier lists, publish collections, reviews, and comments.",
   account: "View your reader profile, import a library, and manage account security.",
@@ -106,26 +106,51 @@ function ratingOptions(selected) {
 function coverMarkup(book, className = "cover") {
   const novelId = Number(book.novel_id || book.id || 0);
   const remote = book.cover_url || "";
-  if (!novelId && !remote) return `<div class="${className} cover-empty" aria-label="Cover unavailable">${escapeHTML((book.title || "N")[0])}</div>`;
+  if (!remote && !book.cover_cached) return `<div class="${className} cover-empty" aria-label="Cover unavailable">${escapeHTML((book.title || "N")[0])}</div>`;
   const source = novelId ? `${API}/covers/${novelId}/proxy` : remote;
-  return `<img class="${className} js-cover" src="${escapeHTML(source)}" data-remote="${escapeHTML(remote)}" data-title="${escapeHTML(book.title || "Novel")}" alt="Cover of ${escapeHTML(book.title || "novel")}" loading="lazy" referrerpolicy="no-referrer">`;
+  return `<img class="${className} js-cover" data-source="${escapeHTML(source)}" data-novel-id="${novelId}" data-remote="${escapeHTML(remote)}" data-title="${escapeHTML(book.title || "Novel")}" alt="Cover of ${escapeHTML(book.title || "novel")}" loading="lazy" referrerpolicy="no-referrer">`;
 }
+
+function showMissingCover(image) {
+  const remote = image.dataset.remote;
+  if (remote && image.src !== remote && !image.dataset.triedRemote) {
+    image.dataset.triedRemote = "true";
+    image.src = remote;
+    return;
+  }
+  const placeholder = document.createElement("div");
+  placeholder.className = `${image.className.replace("js-cover", "")} cover-empty`;
+  placeholder.setAttribute("aria-label", "Cover unavailable");
+  placeholder.textContent = (image.dataset.title || "N")[0];
+  image.replaceWith(placeholder);
+}
+
+const coverObserver = new IntersectionObserver((entries) => {
+  entries.forEach(async (entry) => {
+    if (!entry.isIntersecting) return;
+    const image = entry.target;
+    coverObserver.unobserve(image);
+    const source = image.dataset.source;
+    if (!state.token || !Number(image.dataset.novelId)) {
+      image.src = source;
+      return;
+    }
+    try {
+      const response = await fetch(source, { headers: { Authorization: `Bearer ${state.token}` } });
+      if (!response.ok) throw new Error("Cover unavailable");
+      const objectUrl = URL.createObjectURL(await response.blob());
+      image.addEventListener("load", () => URL.revokeObjectURL(objectUrl), { once: true });
+      image.src = objectUrl;
+    } catch {
+      showMissingCover(image);
+    }
+  });
+}, { rootMargin: "300px" });
 
 function bindCoverFallbacks(root = document) {
   $$("img.js-cover", root).forEach((image) => {
-    image.addEventListener("error", () => {
-      const remote = image.dataset.remote;
-      if (remote && image.src !== remote && !image.dataset.triedRemote) {
-        image.dataset.triedRemote = "true";
-        image.src = remote;
-        return;
-      }
-      const placeholder = document.createElement("div");
-      placeholder.className = `${image.className.replace("js-cover", "")} cover-empty`;
-      placeholder.setAttribute("aria-label", "Cover unavailable");
-      placeholder.textContent = (image.dataset.title || "N")[0];
-      image.replaceWith(placeholder);
-    }, { once: false });
+    image.addEventListener("error", () => showMissingCover(image));
+    coverObserver.observe(image);
   });
 }
 
@@ -169,11 +194,21 @@ function initRouting() {
   showView();
 }
 
+function updatePreview(data) {
+  $("#demo-banner").hidden = !data.demo;
+  const limited = Boolean(data.limited);
+  $("#preview-banner").hidden = !limited;
+  if (limited) {
+    $("#preview-copy").textContent = `Previewing ${data.visible_total ?? data.total_indexed ?? data.novels ?? data.total} of ${data.catalogue_total} catalogue entries. Sign in to browse and search the full collection.`;
+  }
+}
+
 async function refreshCatalogueStats() {
   try {
     const data = await request("/catalogue/stats");
     state.catalogueTotal = data.novels;
-    if ($("#model-catalogue-size")) $("#model-catalogue-size").textContent = `${data.novels.toLocaleString()} records · ${data.storage_mb.toLocaleString()} MB`;
+    updatePreview(data);
+    if ($("#model-catalogue-size")) $("#model-catalogue-size").textContent = `${data.novels.toLocaleString()} ${data.limited ? "preview " : ""}records`;
   } catch {
     setNotice("Catalogue statistics are unavailable.", true);
   }
@@ -259,6 +294,7 @@ async function loadCatalogue(reset = false) {
     const data = await request(`/catalogue?${params}`);
     state.results = reset ? data.items : mergeUnique(state.results, data.items);
     state.catalogueTotal = data.total;
+    updatePreview(data);
     state.hasMore = data.has_more;
     $("#results-title").textContent = state.selectedTags.size ? "Filtered catalogue" : "Latest in the catalogue";
     $("#results-count").textContent = `${data.total.toLocaleString()} novels${state.selectedTags.size ? " match every selected tag" : ""}`;
@@ -302,6 +338,7 @@ async function runSearch(reset = true) {
     });
     state.results = reset ? data.results : mergeUnique(state.results, data.results);
     state.hasMore = data.has_more;
+    updatePreview(data);
     $("#results-title").textContent = `Results for “${query}”`;
     $("#results-count").textContent = `${state.results.length.toLocaleString()} shown from ${data.total_indexed.toLocaleString()} catalogue entries`;
     renderResults();
@@ -1033,7 +1070,11 @@ function clearSession() {
 async function signOut() {
   try { await request("/auth/logout", { method: "POST" }); } catch { /* local session is still cleared */ }
   clearSession();
+  state.selectedTags.clear();
+  updateSelectedTags();
   if (currentView() === "admin") location.hash = "discover";
+  await Promise.all([loadTags(), refreshCatalogueStats()]);
+  if (state.currentQuery) await runSearch(true); else await loadCatalogue(true);
   setNotice("Signed out.");
 }
 
@@ -1052,7 +1093,8 @@ async function authenticate(registering = false) {
     $("#password").value = "";
     closeModal("login-modal");
     updateAccountUI();
-    await refreshLibrary();
+    await Promise.all([refreshLibrary(), loadTags(), refreshCatalogueStats()]);
+    if (state.currentQuery) await runSearch(true); else await loadCatalogue(true);
     setNotice(registering ? `Account created. Signed in as ${state.user.username}.` : `Signed in as ${state.user.username}.`);
     if (data.recovery_code) showRecoveryCode(data.recovery_code, "This code is shown once and can reset the account password.");
   } catch (error) { setAuthMessage(error.message, true); }
@@ -1116,6 +1158,7 @@ async function importLibrary() {
 
 function bindStaticEvents() {
   $("#auth").addEventListener("click", () => state.user ? location.hash="account" : openLogin());
+  $("#preview-signin").addEventListener("click", openLogin);
   $("#close-login").addEventListener("click", () => closeModal("login-modal"));
   $("#close-reset").addEventListener("click", () => closeModal("reset-modal"));
   $("#close-recovery").addEventListener("click", () => { $("#recovery-code").textContent = ""; closeModal("recovery-modal"); });

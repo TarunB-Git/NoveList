@@ -88,6 +88,15 @@ input, textarea, select { width: 100%; border: 1px solid var(--line); border-rad
 input, select { min-height: 40px; padding: 8px 11px; }
 textarea { min-height: 90px; padding: 10px 11px; resize: vertical; }
 input:focus, textarea:focus, select:focus, button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.demo-banner { margin-top: 16px; color: var(--muted); font-size: 12px; }
+.preview-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 18px; padding: 13px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.preview-banner[hidden] { display: none; }
+.preview-banner p { margin: 0; color: var(--muted); font-size: 13px; }
+.preview-banner .outline-button { flex: none; }
+.architecture-notes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 28px; }
+.architecture-notes article { padding: 22px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.architecture-notes h3 { margin: 0 0 8px; font: 500 23px Georgia, serif; }
+.architecture-notes p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
 .selected-tags { display: flex; min-height: 0; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; }
 .selected-tags:empty { display: none; }
 .selected-tags button { padding: 4px 8px; border: 0; border-radius: 20px; background: var(--accent-soft); color: var(--accent-ink); font-size: 10px; font-weight: 700; }
@@ -305,11 +314,13 @@ input:focus, textarea:focus, select:focus, button:focus-visible, a:focus-visible
   .results.grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .library-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .analytics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .architecture-notes { grid-template-columns: 1fr; }
   .split-layout, .profile-summary, .model-map { grid-template-columns: 1fr; }
   .site-footer { grid-template-columns: 1fr; justify-items: center; padding-bottom: 36px; }
 }
 
 @media (max-width: 560px) {
+  .preview-banner { align-items: flex-start; flex-direction: column; }
   .search-bar { flex-wrap: wrap; }
   .search-input { flex-basis: 100%; }
   .search-bar .primary-button, .search-bar .outline-button { flex: 1; }

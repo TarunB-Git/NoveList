@@ -14,11 +14,10 @@ import numpy as np
 
 from embedder import Embedder, build_query_text
 from catalogue_store import load_records
+from paths import INDEX_DIR
 
 logger = logging.getLogger(__name__)
 
-# Directory inside backend/ where build_index.py saves index artifacts
-INDEX_DIR = Path(__file__).parent / "index"
 _TOKEN_RE = re.compile(r"[\w'-]+", re.UNICODE)
 
 
@@ -145,6 +144,7 @@ class SearchEngine:
         query: str,
         top_k: int = 8,
         filter_tags: list[str] | None = None,
+        allowed_ids: set[int] | None = None,
     ) -> Tuple[list[dict], Optional[str]]:
         """
         Full pipeline search.
@@ -161,7 +161,8 @@ class SearchEngine:
                 {tag.casefold().strip() for tag in (filter_tags or []) if tag.strip()}
             )
         )
-        cache_key = (query.casefold().strip(), top_k, wanted_tags)
+        cache_key = (query.casefold().strip(), top_k, wanted_tags,
+                     tuple(sorted(allowed_ids)) if allowed_ids is not None else None)
         cached = self._query_cache.get(cache_key)
         if cached is not None:
             self._query_cache.move_to_end(cache_key)
@@ -184,7 +185,7 @@ class SearchEngine:
         # result without making the UI feel slower.
         k_retrieve = (
             self.num_indexed
-            if wanted_tags
+            if wanted_tags or allowed_ids is not None
             else min(max(top_k * 4, 40), self.num_indexed)
         )
         distances, indices = self.index.search(query_vec, k_retrieve)
@@ -218,6 +219,8 @@ class SearchEngine:
             key=lambda novel: novel.get("ranking_score", 0),
             reverse=True,
         )
+        if allowed_ids is not None:
+            candidates = [novel for novel in candidates if novel.get("id") in allowed_ids]
         if wanted_tags:
             candidates = [
                 novel

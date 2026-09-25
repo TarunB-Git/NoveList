@@ -8,9 +8,11 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
+from paths import DATA_DIR
+
 logger = logging.getLogger(__name__)
 
-COVERS_DIR = Path(__file__).parent / "data" / "covers"
+COVERS_DIR = DATA_DIR / "covers"
 COVERS_DIR.mkdir(parents=True, exist_ok=True)
 _EXTENSIONS = (".jpg", ".webp", ".png", ".avif", ".gif")
 _DEFAULT_COVER_HOSTS = frozenset({

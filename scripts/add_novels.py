@@ -31,8 +31,9 @@ from title_normalizer import choose_title, title_key
 BACKEND_DIR = Path(__file__).parent.parent / "backend"
 sys.path.insert(0, str(BACKEND_DIR))
 from catalogue_store import load_records, save_records  # noqa: E402
+from paths import DATA_DIR  # noqa: E402
 
-LOCK_PATH = BACKEND_DIR / "data" / "catalogue.lock"
+LOCK_PATH = DATA_DIR / "catalogue.lock"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)-8s | %(message)s")
 logger = logging.getLogger("add_novels")

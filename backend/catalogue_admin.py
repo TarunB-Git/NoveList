@@ -7,12 +7,12 @@ import fcntl
 import re
 import threading
 import unicodedata
-from pathlib import Path
 from urllib.parse import urlparse
 
 from catalogue_store import load_records, save_records
+from paths import DATA_DIR
 
-LOCK_PATH = Path(__file__).parent / "data" / "catalogue.lock"
+LOCK_PATH = DATA_DIR / "catalogue.lock"
 _LOCK = threading.RLock()
 
 

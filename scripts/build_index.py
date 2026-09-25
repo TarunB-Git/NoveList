@@ -8,9 +8,7 @@ Run from the project root:
 Or with a custom dataset:
     python scripts/build_index.py --data path/to/novels.json
 
-The script saves two files:
-    backend/index/vectors.npy   — normalized float32 vectors
-    backend/index/metadata.json — catalogue records in vector order
+The script saves vectors and metadata below NOVELIST_DATA_DIR/index.
 """
 
 from __future__ import annotations
@@ -30,6 +28,7 @@ import faiss  # noqa: E402
 import numpy as np  # noqa: E402
 from embedder import Embedder, build_novel_text  # noqa: E402
 from catalogue_store import load_records  # noqa: E402
+from paths import INDEX_DIR  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -115,7 +114,7 @@ def main() -> None:
     parser.add_argument(
         "--index-dir",
         type=Path,
-        default=BACKEND_DIR / "index",
+        default=INDEX_DIR,
         help="Directory to save vectors and metadata",
     )
     parser.add_argument(

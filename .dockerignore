@@ -16,3 +16,4 @@ backend/index/
 .mypy_cache/
 backend/data/novels.json
 backend/data/catalogue.db*
+backend/data/index/

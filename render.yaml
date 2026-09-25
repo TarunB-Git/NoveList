@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: novelist
+    runtime: docker
+    plan: 1c-2g
+    numInstances: 1
+    healthCheckPath: /health
+    envVars:
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: NOVELIST_DATA_DIR
+        value: /app/backend/data
+      - key: CORS_ORIGINS
+        value: ""
+      - key: CORS_ORIGIN_REGEX
+        value: ""
+    disk:
+      name: novelist-state
+      mountPath: /app/backend/data
+      sizeGB: 1

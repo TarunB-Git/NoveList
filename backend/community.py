@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 from collection import DATA_DIR, connection, list_items, now, profile
+from paths import INDEX_DIR
 
 _storage_cache: tuple[float, dict[str, Any]] | None = None
 
@@ -56,7 +57,7 @@ def storage_usage() -> dict[str, Any]:
         "catalogue": DATA_DIR / "catalogue.db",
         "library": DATA_DIR / "library.db",
         "covers": DATA_DIR / "covers",
-        "index": Path(__file__).parent / "index",
+        "index": INDEX_DIR,
     }
     sizes = {}
     for name, target in targets.items():

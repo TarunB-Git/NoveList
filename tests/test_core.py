@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import numpy as np
 from bs4 import BeautifulSoup
+from fastapi import Request
 from fastapi.testclient import TestClient
 
 
@@ -29,6 +30,7 @@ import community  # noqa: E402
 import covers  # noqa: E402
 import main  # noqa: E402
 import search  # noqa: E402
+import state_backup  # noqa: E402
 from scrape_novels import NovelFireScraper, _public_http_url, repair_candidates, scrape_custom_url  # noqa: E402
 from title_normalizer import title_key  # noqa: E402
 
@@ -105,6 +107,8 @@ class CoreTests(unittest.TestCase):
             engine = search.SearchEngine(index_dir)
             results, _ = asyncio.run(engine.search("Dragon Road", top_k=2))
             self.assertEqual(results[0]["title"], "Dragon Road")
+            restricted, _ = asyncio.run(engine.search("Dragon Road", top_k=2, allowed_ids={2}))
+            self.assertEqual([item["novel_id"] for item in restricted], [2])
             (index_dir / "metadata.json").write_text(
                 json.dumps(records[:1]), encoding="utf-8"
             )
@@ -160,7 +164,7 @@ class CoreTests(unittest.TestCase):
         with patch.object(main, "_engine", engine):
             tags = {
                 tag["name"].casefold(): tag["count"]
-                for tag in main.catalogue_tags()["tags"]
+                for tag in main.catalogue_tags(Request({"type": "http", "headers": []}))["tags"]
             }
         self.assertEqual(tags["fantasy"], 2)
         self.assertEqual(tags["action"], 1)
@@ -207,7 +211,7 @@ class CoreTests(unittest.TestCase):
                 self.metadata_by_title = {"dragon road": novel}
                 self.num_indexed = 1
 
-            async def search(self, query, top_k=8, filter_tags=None):
+            async def search(self, query, top_k=8, filter_tags=None, allowed_ids=None):
                 return ([{
                     "novel_id": 7, "title": novel["title"], "score": 0.9,
                     "reason": "Exact title", "synopsis": novel["synopsis"],
@@ -238,6 +242,93 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(saved.json()["tier"], "S")
             library = client.get("/collection", headers=headers)
             self.assertEqual(library.json()["items"][0]["title"], "Dragon Road")
+
+    def test_public_catalogue_preview_unlocks_after_sign_in(self) -> None:
+        novels = [
+            {"id": number, "title": f"Story {number}", "title_aliases": [],
+             "author": "", "synopsis": "A test description", "tags": ["Fantasy"],
+             "cover_url": "", "urls": []}
+            for number in range(1, 31)
+        ]
+
+        class FakeSearchEngine:
+            def __init__(self) -> None:
+                self.metadata = novels
+                self.metadata_by_id = {novel["id"]: novel for novel in novels}
+                self.metadata_by_title = {novel["title"].casefold(): novel for novel in novels}
+                self.num_indexed = len(novels)
+
+            async def search(self, query, top_k=8, filter_tags=None, allowed_ids=None):
+                matches = [novel for novel in novels if allowed_ids is None or novel["id"] in allowed_ids]
+                return ([{**novel, "novel_id": novel["id"], "score": 0.5,
+                          "reason": "Test match"} for novel in matches[:top_k]], None)
+
+        with (
+            patch.dict(os.environ, {"ADMIN_PASSWORD": "temporary-admin-password"}),
+            patch.object(main, "SearchEngine", FakeSearchEngine),
+            TestClient(main.app) as client,
+        ):
+            preview = client.get("/catalogue?page_size=60").json()
+            self.assertEqual(preview["total"], 24)
+            self.assertEqual(preview["visible_total"], 24)
+            self.assertEqual(preview["catalogue_total"], 30)
+            self.assertEqual(preview["items"][0]["id"], 30)
+            self.assertEqual(client.get("/novels?limit=60").json()["total"], 24)
+            self.assertEqual(client.get("/catalogue/tags").json()["tags"][0]["count"], 24)
+            searched = client.post("/search", json={"query": "story", "top_k": 30}).json()
+            self.assertEqual(len(searched["results"]), 24)
+            self.assertEqual(searched["total_indexed"], 24)
+            self.assertEqual(client.get("/novels/1/reviews").status_code, 404)
+
+            account = client.post("/auth/register", json={
+                "username": "preview_reader", "password": "test-password"
+            }).json()
+            headers = {"Authorization": f"Bearer {account['token']}"}
+            full = client.get("/catalogue?page_size=60", headers=headers).json()
+            self.assertEqual(full["total"], 30)
+            self.assertFalse(full["limited"])
+            self.assertEqual(client.get("/catalogue/tags", headers=headers).json()["tags"][0]["count"], 30)
+            searched = client.post("/search", json={"query": "story", "top_k": 30}, headers=headers).json()
+            self.assertEqual(len(searched["results"]), 24)  # default page size
+            self.assertEqual(searched["total_indexed"], 30)
+            self.assertEqual(client.get("/novels/1/reviews", headers=headers).status_code, 200)
+            public_items = [{"novel_id": 1, "title": "Novel 1"},
+                            {"novel_id": 30, "title": "Novel 30"}]
+            with patch.object(main, "public_reader_profile", side_effect=lambda _: {"favorites": list(public_items)}):
+                self.assertEqual([item["novel_id"] for item in
+                                  client.get("/profiles/reader").json()["favorites"]], [30])
+                self.assertEqual(len(client.get("/profiles/reader", headers=headers).json()["favorites"]), 2)
+            with patch.object(main, "get_shared_collection", side_effect=lambda *_: {"items": list(public_items)}):
+                self.assertEqual([item["novel_id"] for item in
+                                  client.get("/shared-collections/1").json()["items"]], [30])
+                self.assertEqual(len(client.get("/shared-collections/1", headers=headers).json()["items"]), 2)
+
+    def test_state_backup_restores_consistent_catalogue(self) -> None:
+        records = [{"id": 1, "title": "Backup Example"}]
+        catalogue_store.save_records(records)
+        collection.initialise()
+        index = self.root / "index"
+        index.mkdir()
+        (index / "metadata.json").write_text(json.dumps(records))
+        np.save(index / "vectors.npy", np.zeros((1, 2), dtype=np.float32))
+        covers_dir = self.root / "covers"
+        covers_dir.mkdir()
+        (covers_dir / "1.jpg").write_bytes(b"sample image bytes")
+        archive = self.root.parent / f"{self.root.name}-backup.zip"
+        try:
+            state_backup.backup(archive, self.root)
+            restored = self.root / "restored"
+            state_backup.restore(archive, restored)
+            self.assertEqual((restored / "covers/1.jpg").read_bytes(), b"sample image bytes")
+            with __import__("sqlite3").connect(restored / "catalogue.db") as database:
+                self.assertEqual(json.loads(database.execute("SELECT payload FROM novels").fetchone()[0]), records[0])
+            with self.assertRaisesRegex(ValueError, "must be empty"):
+                state_backup.restore(archive, restored)
+            (index / "metadata.json").write_text("[]")
+            with self.assertRaisesRegex(ValueError, "differ"):
+                state_backup.backup(archive, self.root)
+        finally:
+            archive.unlink(missing_ok=True)
 
     def test_rating_saves_and_updates_taste_prediction(self) -> None:
         collection.initialise()

@@ -8,10 +8,10 @@ from urllib.parse import urlparse
 from collections import Counter, defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Iterator
 
-DATA_DIR = Path(__file__).parent / "data"
+from paths import DATA_DIR
+
 DB_PATH = DATA_DIR / "library.db"
 VALID_STATUSES = {
     "reading",

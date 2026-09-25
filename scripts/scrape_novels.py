@@ -26,13 +26,15 @@ from bs4 import BeautifulSoup
 
 ROOT_DIR = Path(__file__).parent.parent
 BACKEND_DIR = ROOT_DIR / "backend"
-SCRAPED_URLS_PATH = BACKEND_DIR / "data" / "scraped_urls.txt"
-STATE_PATH = BACKEND_DIR / "data" / "scrape_state.json"
-REPAIR_HISTORY_PATH = BACKEND_DIR / "data" / "repair_history.json"
 sys.path.insert(0, str(Path(__file__).parent))
 from title_normalizer import title_key  # noqa: E402
 sys.path.insert(0, str(BACKEND_DIR))
 from catalogue_store import load_records  # noqa: E402
+from paths import DATA_DIR  # noqa: E402
+
+SCRAPED_URLS_PATH = DATA_DIR / "scraped_urls.txt"
+STATE_PATH = DATA_DIR / "scrape_state.json"
+REPAIR_HISTORY_PATH = DATA_DIR / "repair_history.json"
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s"

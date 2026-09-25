@@ -13,9 +13,8 @@ services:
       - CORS_ORIGIN_REGEX=${CORS_ORIGIN_REGEX:-^https?://(localhost|127\.0\.0\.1)(?::\d+)?$}
       - COVER_EXTRA_HOSTS=${COVER_EXTRA_HOSTS:-}
       - PORT=8080
+      - NOVELIST_DATA_DIR=/app/backend/data
     volumes:
-      # Search artifacts persist across container rebuilds.
-      - novellist-index:/app/backend/index
       - ./backend/data:/app/backend/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
@@ -37,6 +36,3 @@ services:
       backend:
         condition: service_healthy
     restart: unless-stopped
-
-volumes:
-  novellist-index:

@@ -1,4 +1,4 @@
-.PHONY: install install-dev index migrate-catalogue serve health test lint collect-all collect-title repair-metadata collect-novelfire collect-novelfull collect-novelupdates
+.PHONY: install install-dev index migrate-catalogue seed-demo backup serve health test lint collect-all collect-title repair-metadata collect-novelfire collect-novelfull collect-novelupdates
 
 PYTHON ?= python3
 
@@ -6,7 +6,7 @@ PYTHON ?= python3
 ADMIN_USERNAME ?= admin
 PORT ?= 8080
 CORS_ORIGINS ?= http://localhost:3000,http://localhost:8080,http://127.0.0.1:3000,http://127.0.0.1:8080
-export ADMIN_USERNAME ADMIN_PASSWORD PORT CORS_ORIGINS
+export ADMIN_USERNAME ADMIN_PASSWORD PORT CORS_ORIGINS NOVELIST_DATA_DIR
 ifneq ($(strip $(CORS_ORIGIN_REGEX)),)
 export CORS_ORIGIN_REGEX
 endif
@@ -23,6 +23,14 @@ index:
 
 migrate-catalogue:
 	$(PYTHON) backend/catalogue_store.py
+
+seed-demo:
+	$(PYTHON) scripts/seed_demo.py
+	$(MAKE) index
+
+backup:
+	@test -n "$(DEST)" || (echo "Set DEST=/path/to/backup.zip" >&2; exit 1)
+	$(PYTHON) scripts/state_backup.py backup "$(DEST)"
 
 serve:
 	cd backend && $(PYTHON) main.py

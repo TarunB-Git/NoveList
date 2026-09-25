@@ -91,6 +91,8 @@ logger = logging.getLogger(__name__)
 _engine: Optional[SearchEngine] = None
 _frontend_dir = Path(__file__).parent.parent / "frontend"
 _catalogue_job_lock = Lock()
+PUBLIC_CATALOGUE_LIMIT = 24
+DEMO_SOURCE = "NoveList fictional demonstration"
 
 
 @asynccontextmanager
@@ -143,6 +145,29 @@ def _get_engine() -> SearchEngine:
     if _engine is None:
         raise HTTPException(503, "Search engine not ready")
     return _engine
+
+
+def _optional_user(request: Request) -> dict | None:
+    if not request.headers.get("Authorization"):
+        return None
+    return user_from_request(request)
+
+
+def _visible_catalogue(request: Request) -> list[dict]:
+    novels = _get_engine().metadata
+    if _optional_user(request):
+        return novels
+    return sorted(novels, key=lambda novel: int(novel.get("id") or 0), reverse=True)[:PUBLIC_CATALOGUE_LIMIT]
+
+
+def _demo_catalogue() -> bool:
+    novels = _get_engine().metadata
+    return bool(novels) and all(novel.get("source") == DEMO_SOURCE for novel in novels)
+
+
+def _require_visible_novel(request: Request, novel_id: int) -> None:
+    if novel_id not in {novel.get("id") for novel in _visible_catalogue(request)}:
+        raise HTTPException(404, "Novel not found")
 
 
 def _get_novel_by_id(novel_id: int) -> dict:
@@ -250,6 +275,9 @@ class SearchResponse(BaseModel):
     results: List[NovelResult]
     rewritten_query: Optional[str] = None
     total_indexed: int
+    catalogue_total: int = 0
+    limited: bool = False
+    demo: bool = False
     page: int = 1
     page_size: int = 24
     has_more: bool = False
@@ -376,17 +404,20 @@ class CatalogueRecordRequest(BaseModel):
 
 
 @app.post("/search", response_model=SearchResponse, tags=["search"])
-async def search(req: SearchRequest):
+async def search(req: SearchRequest, request: Request):
     eng = _get_engine()
+    visible = _visible_catalogue(request)
+    limited = len(visible) < eng.num_indexed
     query = req.query.strip()
     if not query:
         raise HTTPException(400, "Query must not be empty")
 
-    retrieve = min(eng.num_indexed, max(req.top_k, req.page * req.page_size + 1))
+    retrieve = min(len(visible), max(req.top_k, req.page * req.page_size + 1))
     results, rewritten = await eng.search(
         query=query,
         top_k=retrieve,
         filter_tags=req.tags,
+        allowed_ids={novel["id"] for novel in visible} if limited else None,
     )
 
     start = (req.page - 1) * req.page_size
@@ -431,7 +462,10 @@ async def search(req: SearchRequest):
     return SearchResponse(
         results=novel_results,
         rewritten_query=rewritten,
-        total_indexed=eng.num_indexed,
+        total_indexed=len(visible),
+        catalogue_total=eng.num_indexed,
+        limited=limited,
+        demo=_demo_catalogue(),
         page=req.page,
         page_size=req.page_size,
         has_more=len(results) > start + req.page_size,
@@ -443,14 +477,19 @@ async def search(req: SearchRequest):
 
 @app.get("/novels", tags=["data"])
 def list_novels(
+    request: Request,
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
     eng = _get_engine()
-    novels = [_public_novel(novel) for novel in eng.metadata[offset : offset + limit]]
+    visible = _visible_catalogue(request)
+    novels = [_public_novel(novel) for novel in visible[offset : offset + limit]]
     return {
         "novels": novels,
-        "total": len(eng.metadata),
+        "total": len(visible),
+        "catalogue_total": eng.num_indexed,
+        "limited": len(visible) < eng.num_indexed,
+        "demo": _demo_catalogue(),
         "offset": offset,
         "limit": limit,
     }
@@ -458,6 +497,7 @@ def list_novels(
 
 @app.get("/catalogue", tags=["data"])
 def browse_catalogue(
+    request: Request,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=36, ge=1, le=60),
     tags: List[str] = Query(default=[]),
@@ -465,9 +505,10 @@ def browse_catalogue(
 ):
     eng = _get_engine()
     wanted = {tag.casefold().strip() for tag in tags if tag.strip()}
+    visible = _visible_catalogue(request)
     novels = [
         novel
-        for novel in eng.metadata
+        for novel in visible
         if not wanted
         or wanted.issubset({str(tag).casefold() for tag in novel.get("tags", [])})
     ]
@@ -483,6 +524,10 @@ def browse_catalogue(
     return {
         "items": [_public_novel(novel) for novel in novels[start : start + page_size]],
         "total": total,
+        "visible_total": len(visible),
+        "catalogue_total": eng.num_indexed,
+        "limited": len(visible) < eng.num_indexed,
+        "demo": _demo_catalogue(),
         "page": page,
         "page_size": page_size,
         "pages": max(1, (total + page_size - 1) // page_size),
@@ -491,9 +536,9 @@ def browse_catalogue(
 
 
 @app.get("/catalogue/tags", tags=["data"])
-def catalogue_tags():
+def catalogue_tags(request: Request):
     variants: dict[str, Counter] = {}
-    for novel in _get_engine().metadata:
+    for novel in _visible_catalogue(request):
         seen: set[str] = set()
         for raw_tag in novel.get("tags", []):
             tag = str(raw_tag).strip()
@@ -520,32 +565,40 @@ def catalogue_tags():
 
 
 @app.get("/catalogue/stats", tags=["data"])
-def catalogue_stats():
+def catalogue_stats(request: Request):
     eng = _get_engine()
+    visible = _visible_catalogue(request)
     storage = storage_usage()
     covers = cache_stats()
     return {
-        "novels": eng.num_indexed,
+        "novels": len(visible),
+        "catalogue_total": eng.num_indexed,
+        "limited": len(visible) < eng.num_indexed,
+        "demo": _demo_catalogue(),
         "storage_mb": storage["total"],
         "catalogue_mb": storage["catalogue"],
         "covers_mb": storage["covers"],
         "cached_covers": covers["cached_count"],
-        "with_covers": sum(bool(novel.get("cover_url")) for novel in eng.metadata),
-        "with_authors": sum(bool(novel.get("author")) for novel in eng.metadata),
+        "with_covers": sum(bool(novel.get("cover_url")) for novel in visible),
+        "with_authors": sum(bool(novel.get("author")) for novel in visible),
     }
 
 
 @app.get("/catalogue/featured", tags=["community"])
-def catalogue_featured(limit: int = Query(default=12, ge=1, le=24)):
-    return {"items": featured_favorites(limit)}
+def catalogue_featured(request: Request, limit: int = Query(default=12, ge=1, le=24)):
+    allowed = {novel["id"] for novel in _visible_catalogue(request)}
+    return {"items": [item for item in featured_favorites(24) if item["novel_id"] in allowed][:limit]}
 
 
 @app.get("/profiles/{username}", tags=["community"])
-def public_profile(username: str):
+def public_profile(username: str, request: Request):
     try:
-        return public_reader_profile(username)
+        data = public_reader_profile(username)
     except KeyError as exc:
         raise HTTPException(404, "Reader profile not found") from exc
+    allowed = {novel["id"] for novel in _visible_catalogue(request)}
+    data["favorites"] = [item for item in data["favorites"] if item["novel_id"] in allowed]
+    return data
 
 
 # ── Personal library ───────────────────────────────────────────────────────
@@ -728,7 +781,8 @@ def create_novel_request(
 
 
 @app.get("/novels/{novel_id}/reviews", tags=["community"])
-def get_reviews(novel_id: int):
+def get_reviews(novel_id: int, request: Request):
+    _require_visible_novel(request, novel_id)
     return {"reviews": reviews(novel_id)}
 
 
@@ -770,11 +824,14 @@ def get_one_shared_collection(collection_id: int, request: Request):
     except HTTPException:
         user = None
     try:
-        return get_shared_collection(collection_id, user["id"] if user else None)
+        data = get_shared_collection(collection_id, user["id"] if user else None)
     except KeyError as exc:
         raise HTTPException(404, "Collection not found") from exc
     except PermissionError as exc:
         raise HTTPException(403, "This collection is private") from exc
+    allowed = {novel["id"] for novel in _visible_catalogue(request)}
+    data["items"] = [item for item in data["items"] if item["novel_id"] in allowed]
+    return data
 
 
 @app.post("/shared-collections/{collection_id}/items", tags=["community"])
@@ -1156,11 +1213,12 @@ def cover_stats(user: dict = Depends(user_from_request)):
 
 
 @app.get("/covers/{novel_id}", tags=["covers"])
-def get_cover(novel_id: int):
+def get_cover(novel_id: int, request: Request):
     """
     Serve locally cached cover image for a novel.
     Returns 404 if not cached — use POST /covers/{id}/fetch to download it first.
     """
+    _require_visible_novel(request, novel_id)
     cached = get_cached_path(novel_id)
     if not cached:
         raise HTTPException(
@@ -1235,12 +1293,13 @@ def remove_cover(novel_id: int, user: dict = Depends(user_from_request)):
 
 
 @app.get("/covers/{novel_id}/proxy", tags=["covers"])
-async def proxy_cover(novel_id: int):
+async def proxy_cover(novel_id: int, request: Request):
     """
     Proxy the cover image directly from the source URL without caching.
     Use when you want to display a cover without storing it locally.
     Falls back to cached version if available.
     """
+    _require_visible_novel(request, novel_id)
     # Prefer cached
     cached = get_cached_path(novel_id)
     if cached:
@@ -1335,11 +1394,7 @@ def frontend_asset(asset_path: str):
     else:
         status_code = 200
     media_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
-    cache = (
-        "public, max-age=86400"
-        if candidate.suffix in {".css", ".js", ".svg"}
-        else "no-cache"
-    )
+    cache = "public, max-age=86400" if candidate.suffix == ".svg" else "no-cache"
     return Response(
         candidate.read_bytes(),
         status_code=status_code,

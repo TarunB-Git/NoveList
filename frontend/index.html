@@ -12,7 +12,7 @@
   <meta name="twitter:card" content="summary_large_image">
   <title>NoveList | Discover and rank novels</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css?v=2">
   <script type="application/ld+json">
   {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[
     {"@type":"Question","name":"How are novels ranked?","acceptedAnswer":{"@type":"Answer","text":"New saves receive a tentative tier based on ratings, direct placements, matching tags, and reading state. Rating, moving, or confirming a title updates future suggestions."}},
@@ -46,10 +46,13 @@
       <a href="#discover" data-nav="discover">Discover</a>
       <a href="#library" data-nav="library">Library</a>
       <a href="#tiers" data-nav="tiers">Tier list</a>
+      <a href="#models" data-nav="models">What is it?</a>
       <a href="#community" data-nav="community">Community</a>
       <a href="#account" data-nav="account">Profile</a>
       <a href="#admin" data-nav="admin" id="admin-nav" hidden>Admin</a>
     </nav>
+    <div id="demo-banner" class="demo-banner" hidden>Fictional demonstration catalogue · These records are examples, not published novels.</div>
+    <div id="preview-banner" class="preview-banner" hidden><p id="preview-copy"></p><button id="preview-signin" class="outline-button" type="button">Sign in for the full catalogue</button></div>
     <div id="notice" class="notice" role="status" aria-live="polite"></div>
     <div id="selected-tags" class="selected-tags" aria-label="Selected tag filters"></div>
 
@@ -93,7 +96,7 @@
     </section>
 
     <section id="models" class="view" data-title="Search and tier placement">
-      <div class="section-heading"><div><p class="eyebrow">Two engines, one catalogue</p><h1>Models</h1><p>Catalogue search and tentative tiers use separate signals.</p></div><div id="model-catalogue-size" class="subtle"></div></div>
+      <div class="section-heading"><div><p class="eyebrow">Behind the product</p><h1>What is NoveList?</h1><p>A searchable catalogue and a personal reading workspace. Search helps you find records; tier suggestions help you organize books you have saved.</p></div><div id="model-catalogue-size" class="subtle"></div></div>
       <div class="model-map" aria-label="Search and tier placement flow">
         <article class="model-panel search-model">
           <div class="model-orbit"><span>384</span><small>dimensions</small></div>
@@ -108,7 +111,12 @@
           <div class="model-update"><strong>Update</strong><span>Rate, move, or confirm</span><b>Updates instantly</b></div>
         </article>
       </div>
-      <div class="model-legend"><span><i class="shared-dot"></i>One search index for the catalogue</span><span><i class="private-dot"></i>One taste profile per reader</span></div>
+      <div class="model-legend"><span><i class="shared-dot"></i>One search index for the catalogue</span><span><i class="private-dot"></i>Personal feedback from each reader</span></div>
+      <div class="architecture-notes">
+        <article><h3>How search works</h3><p>The local all-MiniLM-L6-v2 sentence encoder turns catalogue text and a query into 384-number vectors. FAISS compares normalized vectors, then lexical title, alias, author, and tag matches influence the result order. Exact tag filters narrow the result set. This encoder is not a text-generating LLM.</p></article>
+        <article><h3>How tiers adapt</h3><p>Each reader's ratings and chosen or confirmed tiers form a weighted baseline. Matching tags and reading state adjust a saved title's tentative tier. When you rate or move a book, NoveList recalculates only your still-tentative placements. Your direct choices stay yours.</p></article>
+        <article><h3>What the system does not claim</h3><p>It does not train a new neural model for each reader or recommend unseen books. There is no judged search evaluation yet, so match scores and tier suggestions are aids to exploration, not measured predictions of what you will enjoy.</p></article>
+      </div>
     </section>
 
     <section id="analytics" class="view" data-title="Reading analytics">
@@ -165,7 +173,7 @@
     </section>
   </main>
 
-  <footer class="site-footer"><a class="brand" href="#discover">nove<span>list</span></a><nav><a href="#discover">Discover</a><a href="#library">Library</a><a href="#tiers">Tier list</a><a href="#models">Models</a><a href="#analytics">Analytics</a><a href="#community">Community</a><a href="#account">Profile</a><a href="#faq">FAQ</a></nav><p>Reading data stays with this service.</p></footer>
+  <footer class="site-footer"><a class="brand" href="#discover">nove<span>list</span></a><nav><a href="#discover">Discover</a><a href="#library">Library</a><a href="#tiers">Tier list</a><a href="#models">What is it?</a><a href="#analytics">Analytics</a><a href="#community">Community</a><a href="#account">Profile</a><a href="#faq">FAQ</a></nav><p>Reading data stays with this service.</p></footer>
 
   <div id="login-modal" class="modal" aria-hidden="true"><form id="login-form" class="modal-panel"><button id="close-login" type="button" class="modal-close" aria-label="Close">×</button><p class="eyebrow">Your NoveList</p><h2>Sign in or create an account</h2><p id="auth-message" class="form-message" role="status"></p><label>Username<input id="username" required minlength="3" maxlength="32" autocomplete="username"></label><label>Password<input id="password" required maxlength="256" type="password" autocomplete="current-password"></label><button id="sign-in" class="primary-button" type="submit">Sign in</button><button id="register" class="outline-button" type="button">Create account</button><button id="open-reset" class="text-button" type="button">Forgot password?</button></form></div>
   <div id="reset-modal" class="modal" aria-hidden="true"><form id="reset-form" class="modal-panel"><button id="close-reset" type="button" class="modal-close" aria-label="Close">×</button><p class="eyebrow">Account recovery</p><h2>Reset password</h2><p id="reset-message" class="form-message" role="status">Use the recovery code issued when the account was created or last rotated.</p><label>Username<input id="reset-username" required minlength="3" maxlength="32" autocomplete="username"></label><label>Recovery code<input id="reset-code" required minlength="16" maxlength="128" autocomplete="off"></label><label>New password<input id="reset-password" required minlength="10" maxlength="256" type="password" autocomplete="new-password"></label><button class="primary-button" type="submit">Reset password</button></form></div>
@@ -173,6 +181,6 @@
   <div id="review-modal" class="modal" aria-hidden="true"><div class="modal-panel discussion"><button id="close-reviews" type="button" class="modal-close" aria-label="Close">×</button><h2 id="review-title">Reviews</h2><div id="review-list" class="discussion-list"></div><form id="review-form"><label>Rating<select id="review-rating"><option value="">No rating</option><option value="5">5, loved it</option><option value="4">4, liked it</option><option value="3">3, mixed</option><option value="2">2, disliked it</option><option value="1">1, hated it</option></select></label><label>Review<textarea id="review-body" required maxlength="2000"></textarea></label><button class="primary-button" type="submit">Post review</button></form></div></div>
   <div id="collection-modal" class="modal" aria-hidden="true"><div class="modal-panel collection-detail"><button id="close-collection" type="button" class="modal-close" aria-label="Close">×</button><div id="collection-detail"></div></div></div>
 
-  <script src="/app.js" defer></script>
+  <script src="/app.js?v=2" defer></script>
 </body>
 </html>

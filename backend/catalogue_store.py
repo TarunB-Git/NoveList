@@ -8,7 +8,9 @@ import json
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "data" / "catalogue.db"
+from paths import DATA_DIR
+
+DB_PATH = DATA_DIR / "catalogue.db"
 LEGACY_JSON_PATH = DB_PATH.parent / "novels.json"
 
 
