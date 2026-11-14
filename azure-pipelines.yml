@@ -1,0 +1,27 @@
+
+trigger:
+  - main
+
+pr:
+  - main
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.11'
+
+  - task: NodeTool@0
+    inputs:
+      versionSpec: '22.x'
+
+  - script: make install-dev
+    displayName: Install dependencies
+
+  - script: make test
+    displayName: Run tests
+
+  - script: make lint
+    displayName: Run lint checks
