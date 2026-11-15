@@ -1,0 +1,104 @@
+
+name: Deploy NoveList to Azure VM
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+concurrency:
+  group: novelist-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      IMAGE: ghcr.io/tarunb-git/novelist:${{ github.sha }}
+      DOMAIN: ${{ vars.NOVELIST_HOSTNAME }}
+      RESOURCE_GROUP: novelist-rg
+      VM_NAME: novelist-vm
+
+    steps:
+      - name: Check required GitHub settings
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+        run: |
+          for name in DOMAIN AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID GHCR_READ_TOKEN ADMIN_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing GitHub secret or variable: $name"
+              exit 1
+            fi
+          done
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR to push image
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Azure login with OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install and deploy on Azure VM
+        env:
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+        run: |
+          RESULT=$(az vm run-command invoke \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$VM_NAME" \
+            --command-id RunShellScript \
+            --scripts '@scripts/azure-vm-deploy.sh' \
+            --parameters "$IMAGE" "$DOMAIN" 'TarunB-Git' "$GHCR_READ_TOKEN" "$ADMIN_PASSWORD" \
+            --query 'value[0].message' --output tsv)
+          printf '%s\n' "$RESULT"
+          if ! grep -q 'NOVELIST_DEPLOY_OK' <<< "$RESULT"; then
+            echo '::error::VM deploy script did not complete. Inspect Run Command output.'
+            exit 1
+          fi
+
+      - name: Check HTTPS health
+        run: |
+          for i in {1..60}; do
+            if curl -fsS --connect-timeout 5 --max-time 15 "https://$DOMAIN/health" >/tmp/novelist-health.json; then
+              cat /tmp/novelist-health.json
+              echo "Live: https://$DOMAIN"
+              exit 0
+            fi
+            echo "Attempt $i: waiting for app and HTTPS"
+            sleep 10
+          done
+          echo '::error::HTTPS /health did not respond successfully. Check app and Caddy logs.'
+          exit 1
