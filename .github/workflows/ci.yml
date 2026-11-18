@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -51,3 +52,18 @@ jobs:
         run: python -m pip install -r scripts/requirements-cloud.txt
       - name: Test
         run: make test
+
+  deploy:
+    needs: [lint, checks]
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: ./.github/workflows/deploy-azure.yml
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+      ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}

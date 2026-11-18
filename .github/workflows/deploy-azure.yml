@@ -2,9 +2,18 @@
 name: Deploy NoveList to Azure VM
 
 on:
-  push:
-    branches: [main]
-  workflow_dispatch:
+  workflow_call:
+    secrets:
+      AZURE_CLIENT_ID:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+      AZURE_SUBSCRIPTION_ID:
+        required: true
+      GHCR_READ_TOKEN:
+        required: true
+      ADMIN_PASSWORD:
+        required: true
 
 permissions:
   contents: read
@@ -17,6 +26,7 @@ concurrency:
 
 jobs:
   deploy:
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -72,10 +82,17 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Install and deploy on Azure VM
+        id: install
         env:
           GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
           ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
         run: |
+          MAIN_REF=$(git ls-remote --exit-code origin refs/heads/main)
+          read -r MAIN_SHA _ <<< "$MAIN_REF"
+          if [[ "$MAIN_SHA" != "$GITHUB_SHA" ]]; then
+            echo '::notice::Skipping deployment because main has moved to a newer commit.'
+            exit 0
+          fi
           RESULT=$(az vm run-command invoke \
             --resource-group "$RESOURCE_GROUP" \
             --name "$VM_NAME" \
@@ -88,8 +105,10 @@ jobs:
             echo '::error::VM deploy script did not complete. Inspect Run Command output.'
             exit 1
           fi
+          echo 'deployed=true' >> "$GITHUB_OUTPUT"
 
       - name: Check HTTPS health
+        if: steps.install.outputs.deployed == 'true'
         run: |
           for i in {1..60}; do
             if curl -fsS --connect-timeout 5 --max-time 15 "https://$DOMAIN/health" >/tmp/novelist-health.json; then

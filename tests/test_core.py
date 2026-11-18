@@ -124,6 +124,34 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "already contains"):
             catalogue_store.import_json(source)
 
+    def test_title_typo_fallback_preserves_exact_matches_and_visibility(self) -> None:
+        index_dir = self.root / "index"
+        index_dir.mkdir()
+        records = [
+            {"id": 1, "title": "Dragon Road", "title_aliases": ["Wyrm Way"]},
+            {"id": 2, "title": "Dragon Roar"},
+            {"id": 3, "title": "Quiet Garden"},
+        ]
+        (index_dir / "metadata.json").write_text(json.dumps(records), encoding="utf-8")
+        np.save(index_dir / "vectors.npy", np.array([[0, 1], [0, 1], [1, 0]], dtype=np.float32))
+        embedder = SimpleNamespace(dim=2, embed_one=lambda text: np.array([1, 0], dtype=np.float32))
+        with patch.object(search, "Embedder", return_value=embedder):
+            engine = search.SearchEngine(index_dir)
+
+        async def title_matches(query, **options):
+            results, _ = await engine.search(query, **options)
+            return [(result["novel_id"], result["reason"]) for result in results]
+
+        self.assertIn((1, "Possible title typo"), asyncio.run(title_matches("Wrym Way")))
+        self.assertIn((1, "Exact title or title variant"), asyncio.run(title_matches("Dragon Road")))
+        self.assertFalse(any(reason == "Possible title typo" for _, reason in asyncio.run(
+            title_matches("Dragon Roap")
+        )))
+        self.assertEqual(asyncio.run(title_matches("Wrym Way", allowed_ids={3})), [(3, "Semantic match")])
+        engine._query_cache.clear()
+        asyncio.run(title_matches("Wrym Way", use_cache=False))
+        self.assertFalse(engine._query_cache)
+
     def test_empty_index_supports_a_fresh_install(self) -> None:
         class FakeEmbedder:
             dim = 2

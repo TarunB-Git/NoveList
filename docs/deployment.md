@@ -1,5 +1,7 @@
 # Deploying NoveList on Render
 
+For options using free resources or existing student credit, see [hosting choices](hosting-options.md). The [Oracle retry tool](oracle-vm.md) can request a VM for the current disk-based application.
+
 NoveList is a single FastAPI process that also serves the frontend. Its two SQLite databases, cached covers, collector state, and search index live under `NOVELIST_DATA_DIR`. Keep that directory on a persistent disk. The repository does not contain catalogue records or covers.
 
 The root `render.yaml` describes one paid Docker web service, one instance, and a 1 GB disk mounted at `/app/backend/data`. The `1c-2g` compute plan is a deliberate starting point for the local sentence-encoder model; check Render's current price before creating the service. Render's free service cannot attach a persistent disk. A disk-backed service has a brief interruption during deployment and cannot scale to multiple instances. [Render disk documentation](https://render.com/docs/disks)

@@ -1,8 +1,9 @@
 
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+# Azure VM Run Command can execute this script with /bin/sh.
+set -eu
 
-if [[ "$#" -ne 5 ]]; then
+if [ "$#" -ne 5 ]; then
   echo "Expected: IMAGE DOMAIN GHCR_USERNAME GHCR_TOKEN ADMIN_PASSWORD" >&2
   exit 1
 fi

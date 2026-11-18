@@ -39,6 +39,8 @@ Catalogue records and account/library data live in separate SQLite databases und
 
 [`backend/collection.py`](backend/collection.py) computes a reader's tentative tier from weighted ratings and direct tier choices. Matching tags adjust that baseline; reading status affects the weight of each signal. A direct placement stays fixed while later feedback recalculates tentative placements for saved books. The **What is it?** tab walks through these flows in the app.
 
+See the [architecture diagram](docs/architecture.md) for the search, storage, and deployment flow.
+
 ## Development
 
 ```bash
