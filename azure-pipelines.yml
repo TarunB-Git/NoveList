@@ -6,7 +6,7 @@ pr:
   - main
 
 pool:
-  vmImage: ubuntu-latest
+  vmImage: ubuntu-24.04
 
 steps:
   - task: UsePythonVersion@0
@@ -17,11 +17,14 @@ steps:
     inputs:
       versionSpec: '22.x'
 
+  - script: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+    displayName: Install CPU inference runtime
+
   - script: make install-dev
     displayName: Install dependencies
 
-  - script: make test
-    displayName: Run tests
-
   - script: make lint
     displayName: Run lint checks
+
+  - script: make test
+    displayName: Run tests
