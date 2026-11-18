@@ -89,7 +89,7 @@ jobs:
           python scripts/benchmark_search.py \
             --index-dir "$RUNNER_TEMP/search-fixture-index" \
             --queries tests/search_quality_queries.json \
-            --mode hybrid-typo --min-hit-at-5 0.90 --min-single-typo-hit-at-5 0.90 \
+            --mode hybrid-typo --min-hit-at-5 1.00 --min-single-typo-hit-at-5 0.90 \
             | tee "$RUNNER_TEMP/search-quality.json"
         shell: bash
       - name: Upload search report
