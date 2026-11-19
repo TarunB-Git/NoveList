@@ -38,4 +38,9 @@ The index builder downloads MiniLM on first use and writes the generated vectors
 
 ## GitHub Actions verification
 
-Hosted verification is pending. Record the search-quality job duration, hit counts, and links after observing the branch runs under both thresholds. The dependent dry-run job should succeed with both 90% gates and be skipped when the 100% overall gate fails. Verify the final PR with the 90% thresholds and the dry-run job removed.
+| Branch run | Overall Hit@5 | Single-typo Hit@5 | Search-quality job | Dependent dry-run job |
+|---|---:|---:|---:|---|
+| [CI #14](https://github.com/TarunB-Git/NoveList/actions/runs/44414221845) | 26/27, passed at 90% | 12/12, passed at 90% | 1 min 5 s | Passed |
+| [CI #15](https://github.com/TarunB-Git/NoveList/actions/runs/44414300149) | 26/27, failed at 100% | 12/12, passed at 90% | 55 s | Skipped |
+
+Both runs uploaded the JSON report. The passing run measured 7.45 ms p50 and 8.38 ms p95 overall. The temporary dry-run job and 100% threshold were removed after verification.
