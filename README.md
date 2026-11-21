@@ -1,57 +1,47 @@
-# NoveList
+# novelist
 
-NoveList combines metadata search with a personal reading library. It is a FastAPI service with a small, framework-free JavaScript client, SQLite storage, and a local sentence-embedding index.
-
-## What you can do
-
-- Search a novel catalogue by title, alias, author, tag, or description, with semantic and keyword matches in one result list.
-- Track reading status and ratings, import a CSV reading list, and arrange saved books into S–D tiers.
-- Get tentative tier placements based on your own ratings, confirmed placements, matching tags, and reading status.
-- Share collections and reviews. Administrators can edit catalogue records and run metadata collection jobs.
-
-Guests can browse a 24-record catalogue preview; an account opens the full catalogue and personal features.
+Search a novel catalogue, track your reading, and rank books on a personal tier list. novelist also supports CSV reading-list imports, community collections, and reviews. Guests can explore a fictional preview. Sign in to browse the installation's catalogue.
 
 ## Run locally
 
-Use Python 3.11, `pip`, and `make`. Set a unique `ADMIN_PASSWORD` in `.env` before the first start.
+You’ll need Python 3.11 and Make. From the repository root:
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 cp .env.example .env
 make install
-make seed-demo
+```
+
+Set a unique `ADMIN_PASSWORD` in `.env` before the first start. For a fresh catalogue, `make seed-demo` adds fictional books and builds the search index. The first index build downloads the sentence model. If you already have catalogue data, skip the seed.
+
+```bash
 make serve
 ```
 
-Open <http://localhost:8080>. `make seed-demo` loads 30 fictional sample records into an empty catalogue and builds their search index. It also downloads the sentence model on first use. To start with your own catalogue, skip the seed, add records through the administrator interface, and run `make index` after bulk imports.
+Open [novelist on localhost](http://localhost:8080). Sign in with the configured `ADMIN_USERNAME` (default `admin`) and the password you set. You can also create a reader account through the sign-in form.
 
-## How the code works
+### Existing installations
 
-| Path | Responsibility |
-| --- | --- |
-| [`backend/main.py`](backend/main.py) | FastAPI routes, authentication boundaries, catalogue browsing, and static client delivery. |
-| [`backend/catalogue_store.py`](backend/catalogue_store.py), [`backend/collection.py`](backend/collection.py) | SQLite catalogue and per-reader library state. |
-| [`backend/embedder.py`](backend/embedder.py), [`scripts/build_index.py`](scripts/build_index.py) | Build normalized embeddings and write NumPy vectors with matching metadata. |
-| [`backend/search.py`](backend/search.py) | Load vectors into FAISS; combine cosine similarity with exact and token matches, then apply tag filters. |
-| [`scripts/state_backup.py`](scripts/state_backup.py) | Snapshot SQLite state and package index and cover files with checksum verification. |
-| [`frontend/index.html`](frontend/index.html), [`frontend/app.js`](frontend/app.js) | Accessible page structure, hash-based navigation, API calls, and tier-list interactions. |
+- The default data directory is `backend/data/`. For a different directory, set `NOVELIST_DATA_DIR` to an absolute path. It holds the catalogue, accounts, libraries, covers, and search index.
+- Local and hosted copies use separate accounts and data unless configured to use the same installation. `ADMIN_PASSWORD` only creates the initial account. Use your recovery code or run `python scripts/reset_password.py admin` on the host to reset an existing password. Point the script at the installation’s data directory if you use a custom path.
+- Add or edit catalogue records in the Admin tab. Run `make index` after bulk changes and restart the server to load the new index. `make health` shows how many records are loaded.
+- Back up data with `make backup DEST=/absolute/path/to/novelist-backup.zip`. The [deployment guide](docs/deployment.md#back-up-and-restore) covers restore.
 
-Catalogue records and account/library data live in separate SQLite databases under `NOVELIST_DATA_DIR`. An index build turns each record's title, aliases, author, description, and tags into a vector using `all-MiniLM-L6-v2`. At startup, the API checks that index metadata matches the catalogue database. A query is embedded by the same model; FAISS retrieves vector candidates, and lexical matches boost exact titles and matching metadata. Search results then pass through tag and guest-preview filters.
-
-[`backend/collection.py`](backend/collection.py) computes a reader's tentative tier from weighted ratings and direct tier choices. Matching tags adjust that baseline; reading status affects the weight of each signal. A direct placement stays fixed while later feedback recalculates tentative placements for saved books. The **What is it?** tab walks through these flows in the app.
-
-## Development
+## Develop
 
 ```bash
-make install-dev  # add test and lint dependencies
-make test         # Python unittest suite
-make lint         # Ruff and JavaScript syntax check; requires Node.js
-make index        # rebuild the index from the local catalogue
+make install-dev
+make test
+make lint        # JavaScript syntax checks require Node.js
 ```
 
-[GitHub Actions](.github/workflows/ci.yml) runs the tests and lint checks on pushes and pull requests. `docker compose up --build` runs the API and an Nginx frontend locally. For a disk-backed deployment and backup procedure, see [deployment](docs/deployment.md).
+- [Frontend](frontend/) contains the HTML, shared stylesheet, book interactions, and API client.
+- [Backend](backend/) contains FastAPI routes, SQLite storage, search, and tier suggestions.
+- [Scripts](scripts/) contains catalogue, indexing, and backup tools.
+
+Read the [architecture overview](docs/architecture.md), [search benchmark](docs/search-benchmark.md), or [deployment guide](docs/deployment.md) for more detail.
 
 ## Data and license
 
-The repository includes an optional fictional demo seed; application databases, downloaded cover images, and built index files stay outside Git. The app stores catalogue metadata and source links rather than book text. See [data sources and content rights](docs/data-sources.md) before importing third-party descriptions or covers.
-
-Project code and original interface assets are under [Apache License 2.0](LICENSE); see [NOTICE](NOTICE) and [citation metadata](CITATION.cff). Third-party catalogue content has separate rights.
+novelist stores catalogue metadata and source links. See [data sources and content rights](docs/data-sources.md) before importing or publishing third-party descriptions and covers. The code and original assets are licensed under [Apache 2.0](LICENSE). See [NOTICE](NOTICE) for attribution.

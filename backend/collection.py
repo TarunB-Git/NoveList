@@ -23,6 +23,7 @@ VALID_STATUSES = {
 }
 VALID_TIERS = {"S", "A", "B", "C", "D"}
 TIER_SCORES = {"S": 5.0, "A": 4.0, "B": 3.0, "C": 2.0, "D": 1.0}
+TRASH_TIER = "trash"
 
 
 def now() -> str:
@@ -240,12 +241,16 @@ def save_item(
     user_id: int,
     novel: dict[str, Any],
     status: str | None = None,
-    personal_rating: int | None = None,
+    personal_rating: float | None = None,
+    *,
+    tier: str | None = None,
 ) -> dict[str, Any]:
     if status is not None and status not in VALID_STATUSES:
         raise ValueError("Invalid status")
-    if personal_rating is not None and personal_rating not in range(1, 6):
-        raise ValueError("Rating must be between 1 and 5")
+    if personal_rating is not None:
+        validate_rating(personal_rating)
+    if tier is not None and tier not in VALID_TIERS:
+        raise ValueError("Invalid tier")
     novel_id = novel.get("id")
     if novel_id is None:
         raise ValueError("This novel cannot be saved because it has no identifier")
@@ -267,7 +272,7 @@ def save_item(
     if rating_for_prediction is not None:
         prediction = _tier_from_score(float(rating_for_prediction))
         score = float(rating_for_prediction)
-        reason = f"Your {rating_for_prediction}/5 rating is direct placement feedback."
+        reason = f"Your {rating_for_prediction:g}/5 rating is direct placement feedback."
     timestamp = now()
     with connection() as conn:
         if existing:
@@ -336,11 +341,18 @@ def save_item(
                 rating=personal_rating,
                 suggested_tier=prediction,
             )
+        if tier is not None:
+            position = _next_position(conn, user_id, tier)
+            conn.execute(
+                "UPDATE library_items SET tier=?,tier_source='chosen',tier_position=? WHERE user_id=? AND novel_id=?",
+                (tier, position, user_id, novel_id),
+            )
+            _event(conn, user_id, novel_id, "tier_changed", tier=tier)
         row = conn.execute(
             "SELECT * FROM library_items WHERE user_id=? AND novel_id=?",
             (user_id, novel_id),
         ).fetchone()
-    if personal_rating is not None or (
+    if tier is not None or personal_rating is not None or (
         status is not None
         and existing
         and (
@@ -357,6 +369,23 @@ def save_item(
     item = _row_to_item(row)
     item["prediction_sample_size"] = sample
     return item
+
+
+def validate_rating(rating: float) -> None:
+    if not 0.5 <= rating <= 5 or (rating * 2) % 1:
+        raise ValueError("Rating must be between 0.5 and 5 in half-star steps")
+
+
+def remove_item(user_id: int, novel_id: int) -> None:
+    with connection() as conn:
+        removed = conn.execute(
+            "DELETE FROM library_items WHERE user_id=? AND novel_id=?",
+            (user_id, novel_id),
+        )
+        if removed.rowcount == 0:
+            return
+        _event(conn, user_id, novel_id, "removed_from_library")
+    refresh_suggested_items(user_id)
 
 
 def set_tier(
@@ -402,9 +431,10 @@ def set_tier(
 def move_item(
     user_id: int, novel_id: int, tier: str, ordered_novel_ids: list[int]
 ) -> dict[str, Any]:
-    if tier not in VALID_TIERS:
+    if tier not in VALID_TIERS and tier != TRASH_TIER:
         raise ValueError("Invalid tier")
     with connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         item = conn.execute(
             "SELECT tier FROM library_items WHERE user_id=? AND novel_id=?",
             (user_id, novel_id),
@@ -454,7 +484,7 @@ def move_item(
 def refresh_suggested_items(user_id: int, exclude_novel_id: int | None = None) -> None:
     with connection() as conn:
         rows = conn.execute(
-            "SELECT novel_id,tags_json,status FROM library_items WHERE user_id=? AND tier_source='suggested'",
+            "SELECT novel_id,tags_json,status FROM library_items WHERE user_id=? AND tier_source='suggested' AND personal_rating IS NULL",
             (user_id,),
         ).fetchall()
     for row in rows:
@@ -465,16 +495,18 @@ def refresh_suggested_items(user_id: int, exclude_novel_id: int | None = None) -
         )
         with connection() as conn:
             current = conn.execute(
-                "SELECT tier,tier_position FROM library_items WHERE user_id=? AND novel_id=?",
+                "SELECT tier,tier_position FROM library_items WHERE user_id=? AND novel_id=? AND tier_source='suggested' AND personal_rating IS NULL",
                 (user_id, row["novel_id"]),
             ).fetchone()
+            if current is None:
+                continue
             pos = (
                 current["tier_position"]
                 if current["tier"] == tier
                 else _next_position(conn, user_id, tier)
             )
             conn.execute(
-                "UPDATE library_items SET tier=?,tier_position=?,predicted_tier=?,prediction_score=?,prediction_reason=?,updated_at=? WHERE user_id=? AND novel_id=? AND tier_source='suggested'",
+                "UPDATE library_items SET tier=?,tier_position=?,predicted_tier=?,prediction_score=?,prediction_reason=?,updated_at=? WHERE user_id=? AND novel_id=? AND tier_source='suggested' AND personal_rating IS NULL",
                 (tier, pos, tier, score, reason, now(), user_id, row["novel_id"]),
             )
     with connection() as conn:
@@ -534,20 +566,30 @@ def sync_catalogue_metadata(novels: list[dict[str, Any]]) -> int:
     return changed
 
 
-def profile(user_id: int) -> dict[str, Any]:
-    items = list_items(user_id)
+def trash_unlocked(user_id: int) -> bool:
+    with connection() as conn:
+        return conn.execute(
+            """SELECT 1 FROM activity_events
+            WHERE user_id=? AND kind='tier_moved' AND json_extract(detail_json, '$.tier')=?
+            LIMIT 1""",
+            (user_id, TRASH_TIER),
+        ).fetchone() is not None
+
+
+def profile(user_id: int, items: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    if items is None:
+        items = list_items(user_id)
     statuses = Counter(item["status"] for item in items)
-    tiers = Counter(item["tier"] for item in items if item["tier"])
+    tiers = Counter(item["tier"] for item in items if item["tier"] in VALID_TIERS)
     tags = Counter(
         tag for item in items if item["tier"] in {"S", "A"} for tag in item["tags"]
     )
+    feedback = sum(
+        item["personal_rating"] is not None
+        or (item["tier"] in VALID_TIERS and item["tier_source"] != "suggested")
+        for item in items
+    )
     with connection() as conn:
-        feedback = conn.execute(
-            """SELECT COUNT(*) FROM library_items WHERE user_id=? AND (
-            personal_rating IS NOT NULL OR (tier IS NOT NULL AND COALESCE(tier_source,'')!='suggested')
-        )""",
-            (user_id,),
-        ).fetchone()[0]
         events = conn.execute(
             "SELECT COUNT(*) FROM activity_events WHERE user_id=?", (user_id,)
         ).fetchone()[0]

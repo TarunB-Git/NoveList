@@ -3,13 +3,13 @@
 const API = window.API_BASE || (location.port === "3000" ? "/api" : location.origin);
 const STATUS = {
   reading: "Reading",
-  completed: "Completed",
+  completed: "Finished",
   dropped: "Dropped",
-  plan_to_read: "Need to read",
-  continue: "Need to continue",
+  plan_to_read: "Want to read",
+  continue: "Paused",
   paused: "Paused",
 };
-const TIERS = ["S", "A", "B", "C", "D"];
+const MAIN_TABS = ["discover", "library", "tiers", "community"];
 const VIEW_TITLES = {
   discover: "Discover novels",
   library: "Your library",
@@ -37,20 +37,25 @@ const state = {
   user: null,
   token: localStorage.getItem("novellist-token") || "",
   items: [],
+  savedBooks: new Map(),
+  trashUnlocked: false,
+  libraryRequest: 0,
   activeStatus: "all",
-  tierDisplay: localStorage.getItem("novellist-tier-display") || "title",
-  resultLayout: localStorage.getItem("novellist-results-layout") || "grid",
+  tierDisplay: shelfLayout(localStorage.getItem("novellist-tier-display")) || "shelf",
+  resultLayout: localStorage.getItem("novellist-results-layout") || "shelf",
+  libraryLayout: localStorage.getItem("novellist-library-layout") || "shelf",
+  cabinetOpen: false,
+  reviewSuggestions: false,
+  catalogueRequest: 0,
   resultSort: localStorage.getItem("novellist-results-sort") || "recent",
   results: [],
   currentQuery: "",
   selectedTags: new Set(),
   catalogueTags: [],
-  catalogueTotal: 0,
   page: 1,
   hasMore: false,
   loading: false,
   draggedId: null,
-  reviewingNovelId: null,
   exactJobs: new Set(),
   lastCompletedDirectJob: 0,
   editingNovelId: null,
@@ -94,35 +99,32 @@ function titleKey(value) {
   return String(value || "").normalize("NFKC").toLocaleLowerCase().replace(/\b(light novel|webnovel|novel)\b/g, "").replace(/[^\p{L}\p{N}]+/gu, "");
 }
 
-function statusOptions(selected, allowUnsaved = false) {
-  const placeholder = allowUnsaved ? `<option value="" ${selected ? "" : "selected"}>Save to collection</option>` : "";
-  return placeholder + Object.entries(STATUS).map(([value, label]) => `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`).join("");
-}
-
-function ratingOptions(selected) {
-  return `<option value="">Rate</option>${[5, 4, 3, 2, 1].map((value) => `<option value="${value}" ${value === Number(selected) ? "selected" : ""}>${value} ${"★".repeat(value)}</option>`).join("")}`;
-}
-
 function coverMarkup(book, className = "cover") {
-  const novelId = Number(book.novel_id || book.id || 0);
+  const novelId = bookID(book) || 0;
   const remote = book.cover_url || "";
-  if (!remote && !book.cover_cached) return `<div class="${className} cover-empty" aria-label="Cover unavailable">${escapeHTML((book.title || "N")[0])}</div>`;
+  if (!remote && !book.cover_cached) return fallbackCoverMarkup(book, className);
   const source = novelId ? `${API}/covers/${novelId}/proxy` : remote;
-  return `<img class="${className} js-cover" data-source="${escapeHTML(source)}" data-novel-id="${novelId}" data-remote="${escapeHTML(remote)}" data-title="${escapeHTML(book.title || "Novel")}" alt="Cover of ${escapeHTML(book.title || "novel")}" loading="lazy" referrerpolicy="no-referrer">`;
+  return `<img class="${className} js-cover" draggable="false" data-source="${escapeHTML(source)}" data-novel-id="${novelId}" data-remote="${escapeHTML(remote)}" data-title="${escapeHTML(book.title)}" data-author="${escapeHTML(book.author)}" alt="Cover of ${escapeHTML(book.title || "novel")}" loading="lazy" referrerpolicy="no-referrer">`;
+}
+
+function fallbackCoverMarkup({ title, author }, className) {
+  if (className === "book-jacket") {
+    return `<span class="book-jacket cloth" aria-hidden="true"><strong>${escapeHTML(title || "Untitled")}</strong>${author ? `<small>${escapeHTML(author)}</small>` : ""}</span>`;
+  }
+  return `<span class="cover cover-empty" aria-label="Cover unavailable">${escapeHTML((title || "N")[0])}</span>`;
 }
 
 function showMissingCover(image) {
+  if (!image.isConnected) return;
   const remote = image.dataset.remote;
   if (remote && image.src !== remote && !image.dataset.triedRemote) {
     image.dataset.triedRemote = "true";
     image.src = remote;
     return;
   }
-  const placeholder = document.createElement("div");
-  placeholder.className = `${image.className.replace("js-cover", "")} cover-empty`;
-  placeholder.setAttribute("aria-label", "Cover unavailable");
-  placeholder.textContent = (image.dataset.title || "N")[0];
-  image.replaceWith(placeholder);
+  const className = image.classList.contains("book-jacket") ? "book-jacket" : "cover";
+  image.insertAdjacentHTML("afterend", fallbackCoverMarkup(image.dataset, className));
+  image.remove();
 }
 
 const coverObserver = new IntersectionObserver((entries) => {
@@ -138,8 +140,12 @@ const coverObserver = new IntersectionObserver((entries) => {
     try {
       const response = await fetch(source, { headers: { Authorization: `Bearer ${state.token}` } });
       if (!response.ok) throw new Error("Cover unavailable");
-      const objectUrl = URL.createObjectURL(await response.blob());
-      image.addEventListener("load", () => URL.revokeObjectURL(objectUrl), { once: true });
+      const blob = await response.blob();
+      if (!image.isConnected) return;
+      const objectUrl = URL.createObjectURL(blob);
+      const release = () => URL.revokeObjectURL(objectUrl);
+      image.addEventListener("load", release, { once: true });
+      image.addEventListener("error", release, { once: true });
       image.src = objectUrl;
     } catch {
       showMissingCover(image);
@@ -158,29 +164,85 @@ function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
   localStorage.setItem("novellist-theme", theme);
   $("#theme").textContent = theme === "dark" ? "Light" : "Dark";
+  $("#reader-theme").textContent = theme === "dark" ? "Light appearance" : "Dark appearance";
 }
 
 function initTheme() {
   const saved = localStorage.getItem("novellist-theme");
   setTheme(saved || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"));
-  $("#theme").addEventListener("click", () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
+  $$("[data-theme-toggle]").forEach((button) => button.addEventListener("click", () => {
+    setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+    $("#reader-menu").open = false;
+  }));
 }
 
 function currentView() {
   const requested = location.hash.slice(1).split("?")[0];
-  return VIEW_TITLES[requested] ? requested : "discover";
+  return Object.hasOwn(VIEW_TITLES, requested) ? requested : "discover";
+}
+
+let finishTabMotion;
+
+function slideView(previous, next) {
+  finishTabMotion?.();
+  const entering = document.getElementById(next);
+  const leaving = previous && document.getElementById(previous);
+  $$(".view").forEach((view) => {
+    view.classList.toggle("active", view === entering);
+    view.inert = view !== entering;
+  });
+  const from = MAIN_TABS.indexOf(previous);
+  const to = MAIN_TABS.indexOf(next);
+  if (from < 0 || to < 0 || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+  const stage = $("#route-stage");
+  stage.classList.add("route-moving");
+  leaving.classList.add("route-leaving");
+  const distance = Math.sign(to - from) * Math.min(170, stage.clientWidth * .18);
+  const options = { duration: 280, easing: "cubic-bezier(.22,.61,.36,1)" };
+  const animations = [
+    entering.animate([{ transform: `translateX(${distance}px)`, opacity: .4 }, { transform: "none", opacity: 1 }], options),
+    leaving.animate([{ transform: "none", opacity: 1 }, { transform: `translateX(${-distance}px)`, opacity: 0 }], options),
+  ];
+  const finish = () => {
+    if (finishTabMotion !== finish) return;
+    finishTabMotion = null;
+    animations.forEach((animation) => animation.cancel());
+    stage.classList.remove("route-moving");
+    leaving.classList.remove("route-leaving");
+  };
+  finishTabMotion = finish;
+  Promise.allSettled(animations.map((animation) => animation.finished)).then(finish);
+}
+
+function positionTabIndicator() {
+  const nav = $(".primary-nav");
+  const target = $(".active", nav);
+  nav.toggleAttribute("data-has-active", Boolean(target));
+  if (!target) return;
+  nav.style.setProperty("--tab-left", `${target.offsetLeft}px`);
+  nav.style.setProperty("--tab-width", `${target.offsetWidth}px`);
 }
 
 function showView(viewName = currentView()) {
   if (viewName === "admin" && state.user?.role !== "admin") viewName = "discover";
   const previousView = document.body.dataset.view;
-  $$(".view").forEach((view) => view.classList.toggle("active", view.id === viewName));
-  $$("[data-nav]").forEach((link) => link.classList.toggle("active", link.dataset.nav === viewName));
+  if (previousView === viewName) return;
+  closeBookMenu();
+  closeFilters();
+  $("#reader-menu").open = false;
+  if (previousView) window.scrollTo({ top: 0, behavior: "instant" });
+  slideView(previousView, viewName);
+  $$("[data-nav]").forEach((link) => {
+    const active = link.dataset.nav === viewName;
+    link.classList.toggle("active", active);
+    if (active) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
+  });
+  positionTabIndicator();
   document.body.dataset.view = viewName;
-  if (previousView && previousView !== viewName) window.scrollTo(0, 0);
-  document.title = `${VIEW_TITLES[viewName]} | NoveList`;
+  document.title = `${VIEW_TITLES[viewName]} | novelist`;
   $('meta[name="description"]').setAttribute("content", VIEW_DESCRIPTIONS[viewName]);
-  $('meta[property="og:title"]').setAttribute("content", `${VIEW_TITLES[viewName]} | NoveList`);
+  $('meta[property="og:title"]').setAttribute("content", `${VIEW_TITLES[viewName]} | novelist`);
   $('meta[property="og:description"]').setAttribute("content", VIEW_DESCRIPTIONS[viewName]);
   if (viewName === "analytics") renderAnalytics();
   if (viewName === "community") renderCommunity();
@@ -188,28 +250,46 @@ function showView(viewName = currentView()) {
   if (viewName === "admin") refreshJobs();
 }
 
+function navigateTo(view) {
+  if (location.hash !== `#${view}`) history.pushState(null, "", `#${view}`);
+  showView(view);
+}
+
 function initRouting() {
   window.addEventListener("hashchange", () => showView());
-  $$('a[href^="#"]').forEach((link) => link.addEventListener("click", () => {
-    const target = link.getAttribute("href").slice(1);
-    if (VIEW_TITLES[target]) setTimeout(() => showView(target));
-  }));
+  window.addEventListener("popstate", () => showView());
+  new ResizeObserver(positionTabIndicator).observe($(".primary-nav"));
+  const header = $(".site-header");
+  new ResizeObserver(() => {
+    document.documentElement.style.setProperty("--header-height", `${header.offsetHeight}px`);
+    positionFilters();
+  }).observe(header);
+  document.addEventListener("click", (event) => {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const view = event.target.closest('a[href^="#"]')?.getAttribute("href").slice(1);
+    if (!Object.hasOwn(VIEW_TITLES, view)) return;
+    event.preventDefault();
+    $("#reader-menu").open = false;
+    navigateTo(view);
+  });
   showView();
 }
 
 function updatePreview(data) {
-  $("#demo-banner").hidden = !data.demo;
-  const limited = Boolean(data.limited);
+  $("#demo-banner").hidden = !state.user || !data.demo;
+  const limited = !state.user;
   $("#preview-banner").hidden = !limited;
   if (limited) {
-    $("#preview-copy").textContent = `Previewing ${data.visible_total ?? data.total_indexed ?? data.novels ?? data.total} of ${data.catalogue_total} catalogue entries. Sign in to browse and search the full collection.`;
+    $("#preview-copy").textContent = "Fictional catalogue preview";
   }
 }
 
 async function refreshCatalogueStats() {
+  if (!state.user) return;
+  const token = state.token;
   try {
     const data = await request("/catalogue/stats");
-    state.catalogueTotal = data.novels;
+    if (token !== state.token) return;
     updatePreview(data);
   } catch {
     setNotice("Catalogue statistics are unavailable.", true);
@@ -237,7 +317,11 @@ function updateSelectedTags() {
   $("#filter-count").textContent = state.selectedTags.size ? `(${state.selectedTags.size})` : "";
   target.innerHTML = [...state.selectedTags].map((tag) => `<button type="button" data-remove-tag="${escapeHTML(tag)}">${escapeHTML(tag)} ×</button>`).join("");
   $$('[data-remove-tag]', target).forEach((button) => button.addEventListener("click", () => toggleTag(button.dataset.removeTag)));
-  $$('[data-filter-tag]').forEach((button) => button.classList.toggle("active", state.selectedTags.has(button.dataset.filterTag)));
+  $$('[data-filter-tag]').forEach((button) => {
+    const active = state.selectedTags.has(button.dataset.filterTag);
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
 }
 
 function renderTagCloud() {
@@ -248,111 +332,137 @@ function renderTagCloud() {
   const visible = matching.slice(0, query ? 80 : 40);
   const cloud = $("#tag-cloud");
   cloud.innerHTML = visible.length
-    ? visible.map((tag) => `<button type="button" data-filter-tag="${escapeHTML(tag.name)}" style="--tag-weight:${tag.weight}" title="${tag.count.toLocaleString()} novels">${escapeHTML(tag.name)} <small>${tag.count}</small></button>`).join("")
+    ? visible.map((tag) => `<button type="button" data-filter-tag="${escapeHTML(tag.name)}" title="${tag.count.toLocaleString()} novels">${escapeHTML(tag.name)} <small>${tag.count}</small></button>`).join("")
     : '<span class="subtle">No tags found.</span>';
   $("#tag-summary").textContent = query
     ? `${matching.length.toLocaleString()} matching tags`
-    : `Showing ${visible.length} of ${state.catalogueTags.length.toLocaleString()} tags. Search for more.`;
+    : "";
   $$('[data-filter-tag]', cloud).forEach((button) => button.addEventListener("click", () => toggleTag(button.dataset.filterTag)));
   updateSelectedTags();
 }
 
 async function loadTags() {
+  const token = state.token;
   try {
-    const data = await request("/catalogue/tags");
-    state.catalogueTags = data.tags;
+    const tags = state.user ? (await request("/catalogue/tags")).tags : previewTags();
+    if (token !== state.token) return;
+    state.catalogueTags = tags;
     renderTagCloud();
   } catch (error) {
     $("#tag-cloud").textContent = error.message;
   }
 }
 
+function closeFilters(restoreFocus = false) {
+  const panel = $("#tag-dialog");
+  if (panel.open) panel.close();
+  $("#open-filters").setAttribute("aria-expanded", "false");
+  if (restoreFocus) $("#open-filters").focus({ preventScroll: true });
+}
+
+function positionFilters() {
+  const panel = $("#tag-dialog");
+  if (!panel.open) return;
+  const anchor = $("#open-filters").getBoundingClientRect();
+  const { clientWidth, clientHeight } = document.documentElement;
+  if (anchor.bottom < 0 || anchor.top > clientHeight) { closeFilters(); return; }
+  const below = clientHeight - anchor.bottom - 14;
+  const above = anchor.top - 14;
+  const openAbove = below < 220 && above > below;
+  panel.style.setProperty("--filter-space", `${Math.max(120, openAbove ? above : below)}px`);
+  const left = Math.max(8, Math.min(anchor.right - panel.offsetWidth, clientWidth - panel.offsetWidth - 8));
+  const top = openAbove ? anchor.top - panel.offsetHeight - 6 : anchor.bottom + 6;
+  panel.style.left = `${left}px`;
+  panel.style.top = `${Math.max(8, Math.min(top, clientHeight - panel.offsetHeight - 8))}px`;
+}
+
 function toggleTag(tag) {
+  if (currentView() !== "discover") navigateTo("discover");
   if (state.selectedTags.has(tag)) state.selectedTags.delete(tag); else state.selectedTags.add(tag);
   updateSelectedTags();
   if (state.currentQuery) runSearch(true); else loadCatalogue(true);
 }
 
+function invalidateCatalogue() {
+  state.catalogueRequest++;
+  state.loading = false;
+  state.hasMore = false;
+  state.results = [];
+  $("#search").disabled = false;
+  closeBookMenu();
+}
+
 async function loadCatalogue(reset = false) {
-  if (state.loading) return;
-  if (currentView() !== "discover") {
-    location.hash = "#discover";
-    showView("discover");
-  }
+  if (state.loading && !reset) return;
   if (reset) {
+    closeBookMenu();
     state.page = 1;
-    state.results = [];
     state.currentQuery = "";
+    $("#browse-sort").hidden = false;
     state.resultSort = resultSortForBrowse();
     $("#result-sort").value = state.resultSort;
     $("#query").value = "";
-    $("#results").innerHTML = '<div class="skeleton-grid"><div></div><div></div><div></div></div>';
   }
-  state.loading = true;
-  updatePagination();
-  try {
-    const params = new URLSearchParams({ page: state.page, page_size: 40, sort: resultSortForBrowse() });
-    state.selectedTags.forEach((tag) => params.append("tags", tag));
-    const data = await request(`/catalogue?${params}`);
-    state.results = reset ? data.items : mergeUnique(state.results, data.items);
-    state.catalogueTotal = data.total;
-    updatePreview(data);
-    state.hasMore = data.has_more;
-    $("#results-title").textContent = state.selectedTags.size ? "Filtered catalogue" : "Latest in the catalogue";
-    $("#results-count").textContent = `${data.total.toLocaleString()} novels${state.selectedTags.size ? " match every selected tag" : ""}`;
-    renderResults();
-  } catch (error) {
-    setNotice(error.message, true);
-    if (reset) $("#results").innerHTML = `<div class="empty">${escapeHTML(error.message)}</div>`;
-  } finally {
-    state.loading = false;
-    updatePagination();
-  }
+  const params = new URLSearchParams({ page: state.page, page_size: 40, sort: resultSortForBrowse() });
+  state.selectedTags.forEach((tag) => params.append("tags", tag));
+  await refreshResults(reset, async () => {
+    if (state.user) return request(`/catalogue?${params}`);
+    let items = previewMatches();
+    if (state.resultSort === "title") items.sort((a,b) => a.title.localeCompare(b.title));
+    if (state.resultSort === "random") items.sort((a,b) => ((bookID(a) * 2654435761) >>> 0) - ((bookID(b) * 2654435761) >>> 0));
+    return { items, total: items.length, has_more: false, demo: true };
+  });
 }
 
 async function runSearch(reset = true) {
-  const query = $("#query").value.trim();
+  const query = (reset ? $("#query").value : state.currentQuery).trim();
   if (!query) return loadCatalogue(true);
-  if (state.loading) return;
-  if (currentView() !== "discover") {
-    location.hash = "#discover";
-    showView("discover");
-  }
+  if (state.loading && !reset) return;
   if (reset) {
-    if (query !== state.currentQuery) {
-      state.resultSort = "relevance";
-      $("#result-sort").value = "relevance";
-    }
+    closeBookMenu();
     state.page = 1;
-    state.results = [];
     state.currentQuery = query;
-    $("#results").innerHTML = '<div class="skeleton-grid"><div></div><div></div><div></div></div>';
+    $("#browse-sort").hidden = true;
   }
+  const body = { query, top_k: 600, page: state.page, page_size: 30, tags: [...state.selectedTags] };
+  await refreshResults(reset, async () => state.user ? request("/search", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  }) : { results: previewMatches(query), has_more: false, demo: true }, query);
+}
+
+async function refreshResults(reset, load, query = "") {
+  const generation = ++state.catalogueRequest;
   state.loading = true;
-  $("#search").disabled = true;
-  setNotice("Searching the catalogue");
+  if (reset) $("#catalogue-end").replaceChildren();
+  $("#results").setAttribute("aria-busy", "true");
+  $("#search").disabled = Boolean(query);
   updatePagination();
   try {
-    const data = await request("/search", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, top_k: 600, page: state.page, page_size: 30, tags: [...state.selectedTags] }),
-    });
-    state.results = reset ? data.results : mergeUnique(state.results, data.results);
+    const data = await load();
+    if (generation !== state.catalogueRequest) return;
+    const items = query ? data.results : data.items;
+    state.results = reset ? items : mergeUnique(state.results, items);
     state.hasMore = data.has_more;
     updatePreview(data);
-    $("#results-title").textContent = `Results for “${query}”`;
-    $("#results-count").textContent = `${state.results.length.toLocaleString()} shown from ${data.total_indexed.toLocaleString()} catalogue entries`;
+    $("#results-title").textContent = query ? `Results for “${query}”` : "Discover";
+    const total = query ? state.results.length : data.total;
+    $("#results-count").textContent = `${total.toLocaleString()} ${total === 1 ? "novel" : "novels"}${query && data.has_more ? " shown" : ""}`;
     renderResults();
-    setNotice(data.results.length ? "" : "No matching catalogue entries yet.");
-    if (reset) maybeStartExactDiscovery(query, data.results);
+    if (query && reset && state.user) maybeStartExactDiscovery(query, items);
   } catch (error) {
+    if (generation !== state.catalogueRequest) return;
     setNotice(error.message, true);
-    if (reset) $("#results").innerHTML = `<div class="empty">${escapeHTML(error.message)}</div>`;
+    if (reset) {
+      state.results = [];
+      $("#results").innerHTML = `<div class="empty">${escapeHTML(error.message)}</div>`;
+    } else state.page = Math.max(1, state.page - 1);
   } finally {
-    state.loading = false;
-    $("#search").disabled = false;
-    updatePagination();
+    if (generation === state.catalogueRequest) {
+      state.loading = false;
+      $("#search").disabled = false;
+      $("#results").removeAttribute("aria-busy");
+      updatePagination();
+    }
   }
 }
 
@@ -405,61 +515,48 @@ async function requestExactTitle(title) {
   } catch (error) { setNotice(error.message, true); }
 }
 
-function displayResults() {
-  if (state.currentQuery && state.resultSort === "title") return [...state.results].sort((a, b) => a.title.localeCompare(b.title));
-  if (state.currentQuery && state.resultSort === "recent") return [...state.results].sort((a, b) => Number(b.novel_id || b.id) - Number(a.novel_id || a.id));
-  if (state.currentQuery && state.resultSort === "random") return [...state.results].sort((a, b) => ((Number(a.novel_id || a.id) * 2654435761) >>> 0) - ((Number(b.novel_id || b.id) * 2654435761) >>> 0));
-  return state.results;
-}
-
 function renderResults() {
   const target = $("#results");
-  target.className = `results ${state.resultLayout}`;
-  const books = displayResults();
+  const books = state.results;
+  const layout = state.resultLayout;
+  target.className = "book-collection discovery-books";
+  target.dataset.layout = layout;
   if (!books.length) {
-    target.innerHTML = state.catalogueTotal === 0
-      ? '<div class="empty">The catalogue is empty. An administrator can add records from the Admin tab.</div>'
-      : '<div class="empty">No catalogue entries match this search and tag combination.</div>';
+    target.innerHTML = '<div class="empty">No novels match these filters.</div>';
     updatePagination();
     return;
   }
-  const saved = new Map(state.items.map((item) => [item.novel_id, item]));
-  target.innerHTML = books.map((book) => {
-    const novelId = book.novel_id || book.id;
-    const savedItem = saved.get(novelId);
-    const sources = (book.urls || []).slice(0, 2).map((link) => `<a class="source" href="${escapeHTML(link.url)}" target="_blank" rel="noreferrer">${escapeHTML(link.site || "Source")} ↗</a>`).join("");
-    const reason = book.reason || (state.currentQuery ? "Metadata match" : "Recently added to the catalogue");
-    return `<article class="result" data-novel-id="${novelId}">
-      ${coverMarkup(book)}
-      <div class="result-main">
-        <div class="result-top"><h3 class="result-title">${escapeHTML(book.title)}</h3></div>
-        ${(book.title_aliases || []).length ? `<div class="alias">Also known as ${escapeHTML(book.title_aliases.slice(0, 2).join(" · "))}</div>` : ""}
-        ${book.author ? `<div class="author">${escapeHTML(book.author)}</div>` : ""}
-        <div class="reason">${escapeHTML(reason)}</div>
-        <div class="chips">${(book.tags || []).slice(0, 8).map((tag) => `<button class="chip" type="button" data-result-tag="${escapeHTML(tag)}">${escapeHTML(tag)}</button>`).join("")}</div>
-        <div class="result-actions">
-          <select data-auto-status="${novelId}" aria-label="Save or change reading status">${statusOptions(savedItem?.status || "", !savedItem)}</select>
-          <select data-auto-rating="${novelId}" aria-label="Personal rating">${ratingOptions(savedItem?.personal_rating)}</select>
-          <button class="small-button" type="button" data-review="${novelId}">Reviews</button>${state.user?.role === "admin" ? `<button class="small-button" type="button" data-edit-book="${novelId}">Edit</button>` : ""}${sources}
-        </div>
-        ${book.synopsis ? `<details><summary>Description</summary><p>${escapeHTML(book.synopsis)}</p></details>` : ""}
-      </div>
-    </article>`;
-  }).join("");
-  bindCoverFallbacks(target);
-  $$('[data-result-tag]', target).forEach((button) => button.addEventListener("click", () => toggleTag(button.dataset.resultTag)));
-  $$('[data-auto-status]', target).forEach((select) => select.addEventListener("change", () => {
-    if (!select.value) return;
-    const novelId = Number(select.dataset.autoStatus);
-    autoSaveResult(novelId, { status: select.value }, select);
-  }));
-  $$('[data-auto-rating]', target).forEach((select) => select.addEventListener("change", () => {
-    if (!select.value) return;
-    autoSaveResult(Number(select.dataset.autoRating), { rating: Number(select.value) }, select);
-  }));
-  $$('[data-review]', target).forEach((button) => button.addEventListener("click", () => openReviews(Number(button.dataset.review))));
-  $$('[data-edit-book]', target).forEach((button) => button.addEventListener("click", () => openBookEditor(Number(button.dataset.editBook))));
+  const groups = state.currentQuery
+    ? [{ title: "Search results", books }]
+    : groupDiscoverBooks(books);
+  drawBookGroups(target, groups, layout);
+  restoreBookAnchor();
   updatePagination();
+}
+
+function groupDiscoverBooks(books) {
+  const tagKey = (tag) => tag.toLocaleLowerCase();
+  const catalogueTags = new Map(state.catalogueTags.map((tag) => [tagKey(tag.name), tag]));
+  const featured = new Set([...state.catalogueTags]
+    .sort((a, b) => b.count - a.count).slice(0, 8).map((tag) => tagKey(tag.name)));
+  const selected = new Set([...state.selectedTags].map(tagKey));
+  const shelves = new Map();
+  const tagCount = (tag) => catalogueTags.get(tag)?.count || 1;
+  const placeScore = (tag) => Math.log2(tagCount(tag) + 1) / (1 + (shelves.get(tag)?.books.length || 0) * .35);
+  for (const book of books) {
+    const tags = new Map((book.tags || []).map((tag) => [tagKey(tag), tag]));
+    const matches = [...tags.keys()].filter((tag) => featured.has(tag));
+    const preferred = [...tags.keys()].find((tag) => selected.has(tag));
+    const candidates = matches.length ? matches : [...tags.keys()];
+    const key = preferred || candidates.sort((a, b) => placeScore(b) - placeScore(a))[0] || "";
+    if (!shelves.has(key)) {
+      shelves.set(key, { title: catalogueTags.get(key)?.name || tags.get(key) || "Untagged", books: [] });
+    }
+    shelves.get(key).books.push(book);
+  }
+  const ordered = [...shelves.keys()].sort((a, b) =>
+    Number(Boolean(b)) - Number(Boolean(a)) || tagCount(b) - tagCount(a) || a.localeCompare(b));
+  return ordered.map((tag) => shelves.get(tag));
 }
 
 function updatePagination() {
@@ -467,7 +564,6 @@ function updatePagination() {
   button.hidden = !state.hasMore;
   button.disabled = state.loading;
   button.textContent = state.loading ? "Loading" : "Load more";
-  if (!state.hasMore && state.results.length && !$("#catalogue-end").querySelector("button")) $("#catalogue-end").textContent = "End of results";
   if (state.hasMore) $("#catalogue-end").textContent = "";
 }
 
@@ -480,11 +576,12 @@ async function loadNextPage() {
 function initResultControls() {
   const layout = $("#result-view");
   $$('[data-result-layout]', layout).forEach((button) => {
-    button.classList.toggle("active", button.dataset.resultLayout === state.resultLayout);
+    button.setAttribute("aria-pressed", String(button.dataset.resultLayout === state.resultLayout));
     button.addEventListener("click", () => {
+      closeBookMenu();
       state.resultLayout = button.dataset.resultLayout;
       localStorage.setItem("novellist-results-layout", state.resultLayout);
-      $$('[data-result-layout]', layout).forEach((control) => control.classList.toggle("active", control === button));
+      setSelectedLayout("result-view", "result-layout", state.resultLayout);
       renderResults();
     });
   });
@@ -493,197 +590,264 @@ function initResultControls() {
   sort.addEventListener("change", () => {
     state.resultSort = sort.value;
     localStorage.setItem("novellist-results-sort", state.resultSort);
-    if (state.currentQuery) renderResults(); else loadCatalogue(true);
+    loadCatalogue(true);
   });
 }
 
-async function autoSaveResult(novelId, changes, control) {
-  if (!state.user) {
-    renderResults();
-    return openLogin();
-  }
-  const book = state.results.find((item) => Number(item.novel_id || item.id) === novelId);
-  if (!book) return;
-  control.disabled = true;
-  try {
-    await request(`/collection/${novelId}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes) });
-    await refreshLibrary();
-    setNotice(changes.rating ? `${book.title} rated ${changes.rating}/5 and saved.` : `${book.title} saved to ${STATUS[changes.status]}.`);
-  } catch (error) {
-    control.disabled = false;
-    setNotice(error.message, true);
-  }
+function setLibrary({ items = [], trash_unlocked = false } = {}) {
+  state.items = items;
+  state.savedBooks = new Map(items.map((item) => [item.novel_id, item]));
+  state.trashUnlocked = trash_unlocked;
 }
 
-async function refreshLibrary() {
+let lastLibraryResponse = 0;
+
+async function refreshLibrary({ keepBooks = false } = {}) {
+  const token = state.token;
+  const requestId = ++state.libraryRequest;
   if (!state.user) {
-    state.items = [];
+    setLibrary();
     drawLibrary();
     drawTierboard();
     return;
   }
   try {
     const data = await request("/collection");
-    state.items = data.items;
-    drawLibrary();
-    drawTierboard();
-    if (state.results.length) renderResults();
-  } catch (error) { setNotice(error.message, true); }
+    if (state.token !== token || requestId < lastLibraryResponse) return;
+    lastLibraryResponse = requestId;
+    const previous = state.savedBooks;
+    setLibrary(data);
+    drawLibrary(keepBooks);
+    drawTierboard(keepBooks);
+    if (keepBooks) {
+      $$("#results [data-book-key], #collection-detail [data-book-key]").forEach((trigger) => {
+        const book = shelfBooks.get(trigger);
+        if (!book) return;
+        const before = previous.get(bookID(book));
+        const after = state.savedBooks.get(bookID(book));
+        if (before?.status !== after?.status || before?.personal_rating !== after?.personal_rating) {
+          updateBookControls(trigger, book);
+        }
+      });
+    } else if (state.results.length) {
+      renderResults();
+    }
+    restoreBookAnchor();
+  } catch (error) {
+    if (state.token === token) setNotice(error.message, true);
+  }
 }
 
-function drawLibrary() {
-  const filters = $("#filters");
-  filters.innerHTML = [["all", "All"], ...Object.entries(STATUS)].map(([value, label]) => `<button class="${state.activeStatus === value ? "active" : ""}" type="button" data-status-filter="${value}">${label}</button>`).join("");
-  $$('[data-status-filter]', filters).forEach((button) => button.addEventListener("click", () => {
-    state.activeStatus = button.dataset.statusFilter;
-    drawLibrary();
-  }));
+function drawLibrary(keepBooks = false) {
   const target = $("#books");
+  const filters = $("#filters");
+  const toolbar = $("#library-toolbar");
+  const layout = state.libraryLayout;
+  const closed = layout === "shelf" && !state.cabinetOpen;
+  toolbar.hidden = !state.user || closed;
+  setSelectedLayout("library-view", "library-layout", layout);
   if (!state.user) {
     target.innerHTML = '<div class="empty">Sign in to start a personal library.</div>';
     return;
   }
-  const visible = state.activeStatus === "all" ? state.items : state.items.filter((item) => item.status === state.activeStatus);
-  if (!visible.length) {
-    target.innerHTML = '<div class="empty">No saved novels in this reading state.</div>';
+  const status = state.activeStatus;
+  if (!keepBooks || !filters.firstElementChild) {
+    filters.innerHTML = timelineMarkup("Reading status", "filter", READING_STOPS, status, status === "all" ? "All statuses" : STATUS[status]) +
+      `<button type="button" class="text-button library-all" aria-pressed="${status === "all"}">All</button>`;
+    wireTimeline(filters, "filter", READING_STOPS, status, (next) => changeLibraryFilter(next, "#book-track-filter"));
+    $(".library-all", filters).onclick = () => changeLibraryFilter("all", ".library-all");
+  }
+  const groups = READING_STOPS.map(([value, title]) => ({
+    title, books: status === "all" || status === value ? state.items.filter((item) => displayStatus(item.status) === value) : [],
+  })).filter((group) => group.books.length);
+  const canReuse = keepBooks && target.dataset.layout === layout;
+  target.dataset.layout = layout;
+  const empty = '<div class="empty">No saved novels in this reading state.</div>';
+  const shelves = layout === "shelf" ? $(".cabinet-interior", target) : target;
+  if (canReuse && shelves) {
+    if (groups.length) {
+      $(":scope > .empty", shelves)?.remove();
+      syncBookGroups(shelves, groups, layout);
+    } else if (!$(":scope > .empty", shelves)) {
+      shelves.innerHTML = empty;
+    }
     return;
   }
-  target.innerHTML = visible.map((item) => `<article class="library-book">
-    ${coverMarkup(item)}
-    <div><h3>${escapeHTML(item.title)}</h3><p>${item.tier_source === "suggested" ? `Suggested ${item.tier} tier` : item.tier ? `Tier ${item.tier}` : "Not placed"}</p>
-    ${item.tier_source === "suggested" && item.prediction_reason ? `<p>${escapeHTML(item.prediction_reason)}</p>` : ""}
-    <div class="book-controls"><select data-library-status="${item.novel_id}">${statusOptions(item.status)}</select><select data-library-rating="${item.novel_id}" aria-label="Personal rating">${ratingOptions(item.personal_rating)}</select>${item.tier_source === "suggested" ? `<button class="small-button" data-confirm-tier="${item.novel_id}" type="button">Confirm</button>` : ""}</div></div>
-    ${item.cover_url && !item.cover_cached ? `<button class="cache-button" data-cache-cover="${item.novel_id}" type="button">Cache cover</button>` : ""}
-  </article>`).join("");
-  bindCoverFallbacks(target);
-  $$('[data-library-status]', target).forEach((select) => select.addEventListener("change", () => updateStatus(Number(select.dataset.libraryStatus), select.value)));
-  $$('[data-library-rating]', target).forEach((select) => select.addEventListener("change", () => {
-    if (select.value) updateLibraryItem(Number(select.dataset.libraryRating), { rating: Number(select.value) }, "Personal rating updated.");
-  }));
-  $$('[data-confirm-tier]', target).forEach((button) => button.addEventListener("click", () => confirmTier(Number(button.dataset.confirmTier))));
-  $$('[data-cache-cover]', target).forEach((button) => button.addEventListener("click", () => cacheCover(Number(button.dataset.cacheCover), button)));
+  if (layout === "shelf") {
+    const offsets = shelfOffsets(target);
+    target.innerHTML = `<div class="library-cabinet" ${closed ? "" : "data-open"}>
+      <div class="cabinet-interior" ${closed ? "inert" : ""}>${groups.length ? groupMarkup(groups, layout) : empty}</div>
+      <div class="cabinet-doors" ${closed ? "" : "inert"}>
+        <button type="button" class="cabinet-door left" aria-label="Open left cabinet door"><span aria-hidden="true"></span></button>
+        <button type="button" class="cabinet-door right" aria-label="Open right cabinet door"><span aria-hidden="true"></span></button>
+      </div></div>`;
+    bindBookGroups(target, groups);
+    restoreShelfOffsets(target, offsets);
+    $$(".cabinet-door", target).forEach((door) => door.addEventListener("click", (event) => {
+      state.cabinetOpen = true;
+      const cabinet = $(".library-cabinet", target);
+      cabinet.setAttribute("data-open", "");
+      $(".cabinet-interior", cabinet).inert = false;
+      $(".cabinet-doors", cabinet).inert = true;
+      toolbar.hidden = false;
+      if (event.detail === 0) $("#book-track-filter").focus({ preventScroll: true });
+    }));
+  } else if (groups.length) {
+    drawBookGroups(target, groups, layout);
+  } else {
+    target.innerHTML = empty;
+  }
 }
 
-async function updateStatus(novelId, status) {
-  return updateLibraryItem(novelId, { status }, "Reading state updated.");
-}
-
-async function updateLibraryItem(novelId, changes, successMessage) {
-  try {
-    await request(`/collection/${novelId}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes) });
-    await refreshLibrary();
-    setNotice(successMessage);
-  } catch (error) { setNotice(error.message, true); }
-}
-
-async function confirmTier(novelId) {
-  try {
-    await request(`/collection/${novelId}/tier`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm_prediction: true }) });
-    await refreshLibrary();
-    setNotice("Placement confirmed and added to your ranking feedback.");
-  } catch (error) { setNotice(error.message, true); }
+function changeLibraryFilter(status, focusSelector) {
+  if (state.activeStatus === status) return;
+  closeBookMenu();
+  state.activeStatus = status;
+  drawLibrary();
+  $(focusSelector, $("#filters"))?.focus({ preventScroll: true });
 }
 
 async function cacheCover(novelId, button) {
   button.disabled = true;
-  button.textContent = "Caching";
   try {
     await request(`/collection/${novelId}/cover/cache`, { method: "POST" });
     await refreshLibrary();
-    refreshCatalogueStats();
-    setNotice("Cover cached locally.");
+    if (menuState.book && bookID(menuState.book) === novelId) refreshBookMenu("", true);
+    setNotice("Cover cached.");
   } catch (error) {
-    button.disabled = false;
-    button.textContent = "Cache cover";
     setNotice(error.message, true);
+  } finally {
+    button.disabled = false;
   }
 }
 
-function drawTierboard() {
-  const controls = $("#tier-view");
-  $$('[data-display]', controls).forEach((button) => {
-    button.classList.toggle("active", button.dataset.display === state.tierDisplay);
-    button.onclick = () => {
-      state.tierDisplay = button.dataset.display;
-      localStorage.setItem("novellist-tier-display", state.tierDisplay);
-      drawTierboard();
-    };
-  });
+function drawTierboard(keepBooks = false) {
+  const layout = state.tierDisplay;
+  setSelectedLayout("tier-view", "display", layout);
   const target = $("#tierboard");
-  if (!state.user) {
-    target.innerHTML = '<div class="empty">Sign in to arrange your tier list.</div>';
+  const suggestions = state.items.filter((item) => item.tier && item.tier_source === "suggested");
+  const review = $("#review-suggestions");
+  review.hidden = !suggestions.length && !state.reviewSuggestions;
+  review.setAttribute("aria-pressed", String(state.reviewSuggestions));
+  review.innerHTML = `${glyph("Sparkles")} ${state.reviewSuggestions ? "Done reviewing" : "Review suggestions"}${suggestions.length ? ` <span>${suggestions.length}</span>` : ""}`;
+  if (!state.user || (!state.trashUnlocked && !state.items.some((item) => item.tier))) {
+    target.innerHTML = `<div class="empty">${state.user ? "Save a novel to receive its first suggested tier." : "Sign in to arrange your tier list."}</div>`;
     return;
   }
-  if (!state.items.some((item) => item.tier)) {
-    target.innerHTML = '<div class="empty">Save a novel to receive its first tentative placement.</div>';
-    return;
+  const tiers = state.trashUnlocked ? [...TIERS, TRASH_TIER] : TIERS;
+  const groups = tiers.map((tier) => ({ tier, title: tier === TRASH_TIER ? "Trash" : `Tier ${tier}`, books:
+    state.items.filter((item) => item.tier === tier).sort((a, b) => (a.tier_position ?? 0) - (b.tier_position ?? 0)) }));
+  const options = { tiers: true, draggable: true };
+  if (keepBooks && target.dataset.layout === layout) {
+    $(":scope > .empty", target)?.remove();
+    syncBookGroups(target, groups, layout, options);
+  } else {
+    drawBookGroups(target, groups, layout, options);
   }
-  target.innerHTML = TIERS.map((tier) => `<div class="tier-row" data-tier="${tier}"><div class="tier-label">${tier}</div><div class="dropzone" data-tier="${tier}">${state.items.filter((item) => item.tier === tier).sort((a, b) => (a.tier_position ?? 0) - (b.tier_position ?? 0)).map(tierCardMarkup).join("")}</div></div>`).join("");
-  bindCoverFallbacks(target);
-  bindTierDragAndDrop(target);
+  const trashDrop = $(".trash-drop", target);
+  if (state.trashUnlocked) {
+    trashDrop?.remove();
+  } else if (!trashDrop) {
+    target.insertAdjacentHTML("beforeend", `<div class="trash-drop" data-drop-tier="${TRASH_TIER}" aria-hidden="true"></div>`);
+  }
+  bindTierDrag(target, async (id, tier, order) => {
+    try {
+      await request(`/collection/${id}/move`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tier, ordered_novel_ids: order }) });
+      await refreshLibrary({ keepBooks: true });
+      setNotice("Tier list updated.");
+    } catch (error) { setNotice(error.message, true); }
+  });
 }
 
-function tierCardMarkup(item) {
-  const coverMode = state.tierDisplay === "cover";
-  return `<div class="tier-card ${coverMode ? "cover-mode" : ""}" draggable="true" data-tier-card="${item.novel_id}" title="Drag to rank ${escapeHTML(item.title)}">
-    ${coverMarkup(item)}<span class="card-name">${escapeHTML(item.title)}${item.tier_source === "suggested" ? '<br><span class="suggested">tentative placement</span>' : ""}</span><select class="tier-quick" data-quick-tier="${item.novel_id}" aria-label="Move ${escapeHTML(item.title)} to tier">${TIERS.map((tier) => `<option value="${tier}" ${tier === item.tier ? "selected" : ""}>${tier}</option>`).join("")}</select>
-  </div>`;
-}
+const tierDragBound = new WeakSet();
 
-function bindTierDragAndDrop(root) {
-  $$('[data-quick-tier]', root).forEach((select) => select.addEventListener("change", () => quickMoveTier(Number(select.dataset.quickTier), select.value)));
-  $$('[data-tier-card]', root).forEach((card) => {
-    card.addEventListener("dragstart", (event) => {
-      state.draggedId = Number(card.dataset.tierCard);
+function bindTierDrag(root, onDrop) {
+  const zones = $$("[data-drop-tier]", root);
+  const clearDrag = () => {
+    state.draggedId = null;
+    $$("[data-dragged],[data-drag-over],[data-insert]", root).forEach((el) => {
+      el.removeAttribute("data-dragged");
+      el.removeAttribute("data-drag-over");
+      el.removeAttribute("data-insert");
+    });
+  };
+  const context = (zone, event) => {
+    const target = event.target.closest("[data-book-key]");
+    const other = target && Number(target.dataset.bookKey) !== state.draggedId ? target : null;
+    const rect = other?.getBoundingClientRect();
+    const list = zone.closest("[data-layout]")?.dataset.layout === "list";
+    const after = rect && (list ? event.clientY >= rect.top + rect.height / 2 : event.clientX >= rect.left + rect.width / 2);
+    return { target, other, after };
+  };
+  $$('[draggable="true"]', root).forEach((trigger) => {
+    if (tierDragBound.has(trigger)) return;
+    tierDragBound.add(trigger);
+    trigger.addEventListener("dragstart", (event) => {
+      state.draggedId = Number(trigger.dataset.bookKey);
       event.dataTransfer.effectAllowed = "move";
       event.dataTransfer.setData("text/plain", String(state.draggedId));
-      requestAnimationFrame(() => card.classList.add("dragging"));
+      requestAnimationFrame(() => { if (state.draggedId !== null) trigger.setAttribute("data-dragged", ""); });
     });
-    card.addEventListener("dragend", () => {
-      state.draggedId = null;
-      $$(".dragging,.drag-over", root).forEach((element) => element.classList.remove("dragging", "drag-over"));
-    });
+    trigger.addEventListener("dragend", clearDrag);
   });
-  $$(".dropzone", root).forEach((zone) => {
+  zones.forEach((zone) => {
+    if (tierDragBound.has(zone)) return;
+    tierDragBound.add(zone);
     zone.addEventListener("dragover", (event) => {
+      if (state.draggedId === null) return;
       event.preventDefault();
-      zone.classList.add("drag-over");
-      const moving = $(`[data-tier-card="${state.draggedId}"]`, root);
-      if (!moving) return;
-      const siblings = $$('[data-tier-card]:not(.dragging)', zone);
-      const after = siblings.find((card) => event.clientX < card.getBoundingClientRect().left + card.offsetWidth / 2);
-      zone.insertBefore(moving, after || null);
+      event.dataTransfer.dropEffect = "move";
+      $$("[data-drag-over],[data-insert]", root).forEach((el) => {
+        el.removeAttribute("data-drag-over");
+        el.removeAttribute("data-insert");
+      });
+      zone.setAttribute("data-drag-over", "");
+      const { other, after } = context(zone,event);
+      if (other) other.dataset.insert = after ? "after" : "before";
     });
-    zone.addEventListener("dragleave", (event) => { if (!zone.contains(event.relatedTarget)) zone.classList.remove("drag-over"); });
-    zone.addEventListener("drop", async (event) => {
+    zone.addEventListener("dragleave", (event) => {
+      if (zone.contains(event.relatedTarget)) return;
+      zone.removeAttribute("data-drag-over");
+      $$("[data-insert]", zone).forEach((el) => el.removeAttribute("data-insert"));
+    });
+    zone.addEventListener("drop", (event) => {
+      if (state.draggedId === null) return;
       event.preventDefault();
-      zone.classList.remove("drag-over");
-      const novelId = state.draggedId || Number(event.dataTransfer.getData("text/plain"));
-      if (!novelId) return;
-      const order = $$('[data-tier-card]', zone).map((card) => Number(card.dataset.tierCard));
-      try {
-        await request(`/collection/${novelId}/move`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tier: zone.dataset.tier, ordered_novel_ids: order }) });
-        await refreshLibrary();
-        setNotice("Tier list updated. The move now informs future placements.");
-      } catch (error) {
-        await refreshLibrary();
-        setNotice(error.message, true);
-      }
+      const id = state.draggedId;
+      const { target, other, after } = context(zone,event);
+      const books = $$("[data-book-key]", zone).map((el) => Number(el.dataset.bookKey)).filter((key) => key !== id);
+      const neighbour = other && books.indexOf(Number(other.dataset.bookKey));
+      const index = neighbour !== null && neighbour >= 0 ? neighbour + Number(after) : books.length;
+      books.splice(index, 0, id);
+      clearDrag();
+      if (Number(target?.dataset.bookKey) !== id) onDrop(id, zone.dataset.dropTier, books);
     });
   });
 }
 
-async function quickMoveTier(novelId, tier) {
-  const order = state.items.filter((item) => item.tier === tier && item.novel_id !== novelId).sort((a, b) => (a.tier_position ?? 0) - (b.tier_position ?? 0)).map((item) => item.novel_id);
-  order.push(novelId);
-  try {
-    await request(`/collection/${novelId}/move`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tier, ordered_novel_ids: order }) });
-    await refreshLibrary();
-    setNotice("Tier updated and recorded as ranking feedback.");
-  } catch (error) {
-    await refreshLibrary();
-    setNotice(error.message, true);
-  }
+function initCollectionControls() {
+  $("#library-view").addEventListener("click", (event) => {
+    const layout = event.target.closest("[data-library-layout]")?.dataset.libraryLayout;
+    if (!layout || layout === state.libraryLayout) return;
+    closeBookMenu();
+    state.libraryLayout = layout;
+    localStorage.setItem("novellist-library-layout", layout);
+    drawLibrary();
+  });
+  $("#tier-view").addEventListener("click", (event) => {
+    const layout = event.target.closest("[data-display]")?.dataset.display;
+    if (!layout || layout === state.tierDisplay) return;
+    closeBookMenu();
+    state.tierDisplay = layout;
+    localStorage.setItem("novellist-tier-display", layout);
+    drawTierboard();
+  });
+  $("#review-suggestions").addEventListener("click", () => {
+    state.reviewSuggestions = !state.reviewSuggestions;
+    closeBookMenu();
+    drawTierboard();
+    if (state.reviewSuggestions) nextSuggestedBook();
+  });
 }
 
 function metricCard(label, value, hint = "") {
@@ -727,47 +891,32 @@ async function renderAnalytics() {
 
 async function renderAccount() {
   const target = $("#account-summary");
-  if (!state.user) {
+  const reader = state.user;
+  if (!reader) {
     target.innerHTML = '<div class="empty">Sign in to view your profile and account controls.</div>';
     return;
   }
   try {
     const data = await request("/profile");
-    target.innerHTML = `<article class="profile-card"><div class="profile-avatar">${escapeHTML(state.user.username[0].toUpperCase())}</div><h2>${escapeHTML(state.user.username)}</h2><p class="subtle">${escapeHTML(state.user.role)} account</p><div class="taste-tags">${(data.favorite_tags || []).map((tag) => `<span>${escapeHTML(tag)}</span>`).join("") || "No favourite tags yet"}</div></article>
-      <article class="chart-panel"><h2>Public reading summary</h2><div class="analytics-grid">${metricCard("Saved", data.library_count)}${metricCard("Taste signals", data.feedback_count)}${metricCard("Events", data.event_count)}${metricCard("S tier", data.tier_counts.S || 0)}</div><div style="margin-top:18px">${barChart(data.status_counts, STATUS)}</div></article>`;
-  } catch (error) { target.innerHTML = `<div class="empty">${escapeHTML(error.message)}</div>`; }
-}
-
-async function openReviews(novelId) {
-  state.reviewingNovelId = novelId;
-  const book = state.results.find((item) => Number(item.novel_id || item.id) === novelId) || state.items.find((item) => item.novel_id === novelId);
-  $("#review-title").textContent = book ? `Reviews of ${book.title}` : "Reviews";
-  $("#review-list").innerHTML = '<p class="subtle">Loading reviews</p>';
-  $("#review-form").hidden = !state.user;
-  openModal("review-modal");
-  try {
-    const data = await request(`/novels/${novelId}/reviews`);
-    $("#review-list").innerHTML = (data.reviews.length ? data.reviews.map((review) => `<article class="review-entry"><strong>${escapeHTML(review.username)}${review.rating ? ` · ${review.rating}/5` : ""}</strong><small> · ${escapeHTML(review.created_at)}</small><p>${escapeHTML(review.body)}</p></article>`).join("") : '<p class="subtle">No reviews yet.</p>') + (!state.user ? '<button id="review-login" class="outline-button" type="button">Sign in to write a review</button>' : "");
-    $("#review-login")?.addEventListener("click", () => { closeModal("review-modal"); openLogin(); });
-  } catch (error) { $("#review-list").textContent = error.message; }
-}
-
-async function submitReview(event) {
-  event.preventDefault();
-  if (!state.reviewingNovelId) return;
-  try {
-    await request(`/novels/${state.reviewingNovelId}/reviews`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body: $("#review-body").value, rating: $("#review-rating").value ? Number($("#review-rating").value) : null }) });
-    event.target.reset();
-    await openReviews(state.reviewingNovelId);
-    setNotice("Review posted.");
-  } catch (error) { setNotice(error.message, true); }
+    if (state.user !== reader) return;
+    target.innerHTML = `<article class="profile-card">
+      <div class="reader-identity"><div class="profile-avatar" aria-hidden="true">${escapeHTML(reader.username[0].toUpperCase())}</div>
+      <div><h2>${escapeHTML(reader.username)}</h2><p class="subtle">${reader.role === "admin" ? "Administrator" : "Reader"} · ${data.library_count} saved · ${data.tier_counts.S || 0} in S tier</p></div></div>
+      ${data.favorite_tags?.length ? `<div class="taste-tags">${data.favorite_tags.map((tag) => `<span>${escapeHTML(tag)}</span>`).join("")}</div>` : ""}
+      <div class="profile-actions">
+        <button type="button" class="outline-button" data-profile-action="public">View public profile</button>
+        <button type="button" class="text-button" data-profile-action="logout">Sign out</button>
+      </div></article>`;
+  } catch (error) {
+    if (state.user === reader) target.innerHTML = `<div class="empty">${escapeHTML(error.message)}</div>`;
+  }
 }
 
 async function renderCommunity() {
   const target = $("#shared-collections");
   try {
     const data = await request("/shared-collections");
-    target.innerHTML = data.collections.length ? data.collections.map((collection) => `<article class="collection-card"><h2>${escapeHTML(collection.name)}</h2><button class="text-button byline" data-reader="${escapeHTML(collection.username)}" type="button">by ${escapeHTML(collection.username)}</button><p>${escapeHTML(collection.description || "A reader-made collection")}</p><div class="collection-actions"><button class="small-button" data-open-collection="${collection.id}" type="button">Open tier list</button><button class="small-button" data-follow-collection="${collection.id}" data-following="${collection.following ? "true" : "false"}" type="button">${collection.following ? "Unfollow" : "Follow"} · ${collection.followers}</button></div></article>`).join("") : '<div class="empty">No public collections yet. Create the first one.</div>';
+    target.innerHTML = data.collections.length ? data.collections.map((collection) => `<article class="collection-card"><h2>${escapeHTML(collection.name)}</h2><button class="text-button byline" data-reader="${escapeHTML(collection.username)}" type="button">by ${escapeHTML(collection.username)}</button>${collection.description ? `<p>${escapeHTML(collection.description)}</p>` : ""}<div class="collection-actions"><button class="small-button" data-open-collection="${collection.id}" type="button">Open tier list</button><button class="small-button" data-follow-collection="${collection.id}" data-following="${collection.following ? "true" : "false"}" type="button">${collection.following ? "Unfollow" : "Follow"} · ${collection.followers}</button></div></article>`).join("") : '<div class="empty">No public collections yet. Create the first one.</div>';
     $$('[data-open-collection]', target).forEach((button) => button.addEventListener("click", () => openCollection(Number(button.dataset.openCollection))));
     $$('[data-follow-collection]', target).forEach((button) => button.addEventListener("click", () => followCollection(Number(button.dataset.followCollection), button.dataset.following !== "true")));
     $$('[data-reader]', target).forEach((button) => button.addEventListener("click", () => openReaderProfile(button.dataset.reader)));
@@ -795,34 +944,36 @@ async function followCollection(collectionId, following) {
 }
 
 async function openCollection(collectionId) {
+  closeBookMenu();
   openModal("collection-modal");
   const target = $("#collection-detail");
   target.innerHTML = '<div class="skeleton wide"></div>';
   try {
     const [collection, comments] = await Promise.all([request(`/shared-collections/${collectionId}`), request(`/shared-collections/${collectionId}/comments`)]);
     const savedOptions = state.items.map((item) => `<option value="${item.novel_id}">${escapeHTML(item.title)}</option>`).join("");
-    target.innerHTML = `<p class="eyebrow">Community tier list</p><h2>${escapeHTML(collection.name)}</h2><p class="subtle">by ${escapeHTML(collection.username)} · ${collection.followers} followers</p><p>${escapeHTML(collection.description)}</p>
-      ${collection.items.length ? `<div class="tierboard shared-tierboard">${TIERS.map((tier) => `<div class="tier-row" data-tier="${tier}"><div class="tier-label">${tier}</div><div class="dropzone" data-shared-zone="${tier}">${collection.items.filter((book) => (book.tier || "C") === tier).sort((a,b) => a.position-b.position).map((book) => `<article class="collection-detail-book" ${state.user?.id===collection.user_id?'draggable="true"':''} data-shared-card="${book.novel_id}">${coverMarkup(book)}<strong>${escapeHTML(book.title)}</strong></article>`).join("")}</div></div>`).join("")}</div>` : '<div class="empty">No novels have been added yet.</div>'}
+    const owned = state.user?.id === collection.user_id;
+    const groups = TIERS.map((tier) => ({ tier, title: `Tier ${tier}`, books:
+      collection.items.filter((book) => (book.tier || "C") === tier).sort((a,b) => a.position - b.position) }));
+    target.innerHTML = `<h2>${escapeHTML(collection.name)}</h2><p class="subtle">by ${escapeHTML(collection.username)} · ${collection.followers} followers</p><p>${escapeHTML(collection.description)}</p>
+      <div class="book-collection shared-books" data-layout="list">${collection.items.length ? groupMarkup(owned ? groups : groups.filter((group) => group.books.length), "list", { tiers: true, draggable: owned }) : '<div class="empty">No novels have been added yet.</div>'}</div>
       ${state.user?.id === collection.user_id ? `<div class="collection-actions" style="margin-top:12px"><select id="collection-item-select">${savedOptions || '<option value="">Save a novel first</option>'}</select><button id="add-collection-item" class="small-button" type="button">Add saved novel</button></div>` : ""}
       <h3>Comments</h3><div class="comment-list">${comments.comments.length ? comments.comments.map((comment) => `<div class="comment"><strong>${escapeHTML(comment.username)}</strong> ${escapeHTML(comment.body)}</div>`).join("") : '<p class="subtle">No comments yet.</p>'}</div>
       <form id="collection-comment-form" class="collection-actions" style="margin-top:10px"><input id="collection-comment" maxlength="2000" required placeholder="Add to the discussion"><button class="small-button" type="submit">Comment</button></form>`;
-    bindCoverFallbacks(target);
-    if (state.user?.id === collection.user_id) bindSharedTierDrag(collectionId);
+    if (collection.items.length) {
+      bindBookGroups(target, owned ? groups : groups.filter((group) => group.books.length));
+      if (owned) bindTierDrag(target, async (id, tier, order) => {
+        try {
+          await request(`/shared-collections/${collectionId}/items/${id}/move`, {
+            method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tier, ordered_novel_ids: order }),
+          });
+          await openCollection(collectionId);
+          setNotice("Collection updated.");
+        } catch (error) { setNotice(error.message, true); }
+      });
+    }
     $("#add-collection-item")?.addEventListener("click", () => addCollectionItem(collectionId));
     $("#collection-comment-form").addEventListener("submit", (event) => submitCollectionComment(event, collectionId));
   } catch (error) { target.innerHTML = `<div class="empty">${escapeHTML(error.message)}</div>`; }
-}
-
-function bindSharedTierDrag(collectionId) {
-  let movingId = null;
-  $$('[data-shared-card]').forEach((card) => {
-    card.addEventListener("dragstart", (event) => { movingId=Number(card.dataset.sharedCard); event.dataTransfer.setData("text/plain",String(movingId)); requestAnimationFrame(() => card.classList.add("dragging")); });
-    card.addEventListener("dragend", () => { movingId=null; card.classList.remove("dragging"); $$(".drag-over").forEach((zone) => zone.classList.remove("drag-over")); });
-  });
-  $$('[data-shared-zone]').forEach((zone) => {
-    zone.addEventListener("dragover", (event) => { event.preventDefault(); zone.classList.add("drag-over"); const moving=$(`[data-shared-card="${movingId}"]`); if (!moving) return; const after=$$('[data-shared-card]:not(.dragging)',zone).find((card) => event.clientX < card.getBoundingClientRect().left + card.offsetWidth/2); zone.insertBefore(moving,after||null); });
-    zone.addEventListener("drop", async (event) => { event.preventDefault(); const novelId=movingId||Number(event.dataTransfer.getData("text/plain")); const order=$$('[data-shared-card]',zone).map((card)=>Number(card.dataset.sharedCard)); try { await request(`/shared-collections/${collectionId}/items/${novelId}/move`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({tier:zone.dataset.sharedZone,ordered_novel_ids:order})}); await openCollection(collectionId); setNotice("Collection tier list updated."); } catch(error) { await openCollection(collectionId); setNotice(error.message,true); } });
-  });
 }
 
 async function addCollectionItem(collectionId) {
@@ -933,10 +1084,10 @@ function resetBookEditor() {
   $("#editor-record-id").textContent = "New record";
 }
 
-function openBookEditor(novelId) {
+function openBookEditor(novelId, selectedBook) {
   if (state.user?.role !== "admin") return;
-  const book = state.results.find((item) => Number(item.novel_id || item.id) === novelId)
-    || state.items.find((item) => Number(item.novel_id) === novelId);
+  const book = selectedBook || state.results.find((item) => Number(item.novel_id || item.id) === novelId)
+    || state.savedBooks.get(novelId);
   if (!book) return setNotice("Reload the catalogue before editing this record.", true);
   state.editingNovelId = novelId;
   $("#editor-record-id").textContent = `Record #${novelId}`;
@@ -945,7 +1096,7 @@ function openBookEditor(novelId) {
   $("#editor-author").value = book.author || "";
   $("#editor-synopsis").value = book.synopsis || "";
   $("#editor-tags").value = (book.tags || []).join(", ");
-  $("#editor-status").value = book.status || "";
+  $("#editor-status").value = book.publication ?? book.status ?? "";
   $("#editor-source").value = book.source || "";
   $("#editor-cover").value = book.cover_url || "";
   $("#editor-links").value = (book.urls || []).map((link) => `${link.site || "Source"} | ${link.url}`).join("\n");
@@ -1004,6 +1155,7 @@ function closeModal(id) {
   modal.classList.remove("open");
   modal.setAttribute("aria-hidden", "true");
   if (id === "recovery-modal") $("#recovery-code").textContent = "";
+  if (id === "collection-modal" && menuState.host?.id === "collection-detail") closeBookMenu();
 }
 
 function setAuthMessage(message, isError = false) {
@@ -1057,26 +1209,29 @@ function openLogin() {
 function clearSession() {
   state.user = null;
   state.token = "";
-  state.items = [];
+  setLibrary();
+  state.cabinetOpen = false;
+  state.activeStatus = "all";
+  state.reviewSuggestions = false;
+  state.catalogueTags = [];
+  state.selectedTags.clear();
+  updateSelectedTags();
+  invalidateCatalogue();
   localStorage.removeItem("novellist-token");
-  $("#auth").textContent = "Sign in";
-  $("#admin").hidden = true;
-  $("#admin-nav").hidden = true;
-  $("#account-controls").hidden = true;
+  syncReaderMenu();
+  applyBookZoom();
   drawLibrary();
   drawTierboard();
   renderAnalytics();
   renderAccount();
+  loadTags();
+  if (state.currentQuery) runSearch(true); else loadCatalogue(true);
 }
 
 async function signOut() {
   try { await request("/auth/logout", { method: "POST" }); } catch { /* local session is still cleared */ }
   clearSession();
-  state.selectedTags.clear();
-  updateSelectedTags();
-  if (currentView() === "admin") location.hash = "discover";
-  await Promise.all([loadTags(), refreshCatalogueStats()]);
-  if (state.currentQuery) await runSearch(true); else await loadCatalogue(true);
+  if (currentView() === "admin") navigateTo("discover");
   setNotice("Signed out.");
 }
 
@@ -1091,6 +1246,10 @@ async function authenticate(registering = false) {
     const data = await request(registering ? "/auth/register" : "/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, password }) });
     state.token = data.token;
     state.user = data.user;
+    invalidateCatalogue();
+    state.selectedTags.clear();
+    updateSelectedTags();
+    $("#results").innerHTML = '<div class="skeleton wide"></div>';
     localStorage.setItem("novellist-token", state.token);
     $("#password").value = "";
     closeModal("login-modal");
@@ -1103,11 +1262,21 @@ async function authenticate(registering = false) {
   finally { buttons.forEach((button) => { button.disabled = false; }); }
 }
 
-function updateAccountUI() {
-  $("#auth").textContent = state.user ? state.user.username : "Sign in";
+function syncReaderMenu() {
+  const menu = $("#reader-menu");
+  menu.hidden = !state.user;
+  if (menu.hidden) menu.open = false;
+  $("#auth").hidden = Boolean(state.user);
+  $("#theme").hidden = Boolean(state.user);
+  $("#reader-menu-user").textContent = state.user?.username || "";
   $("#admin").hidden = state.user?.role !== "admin";
   $("#admin-nav").hidden = state.user?.role !== "admin";
   $("#account-controls").hidden = !state.user;
+}
+
+function updateAccountUI() {
+  syncReaderMenu();
+  applyBookZoom();
   renderAccount();
   renderAnalytics();
   renderCommunity();
@@ -1164,10 +1333,9 @@ function bindStaticEvents() {
   $("#close-login").addEventListener("click", () => closeModal("login-modal"));
   $("#close-reset").addEventListener("click", () => closeModal("reset-modal"));
   $("#close-recovery").addEventListener("click", () => { $("#recovery-code").textContent = ""; closeModal("recovery-modal"); });
-  $("#close-reviews").addEventListener("click", () => closeModal("review-modal"));
   $("#close-collection").addEventListener("click", () => closeModal("collection-modal"));
   $$(".modal").forEach((modal) => modal.addEventListener("click", (event) => { if (event.target === modal) closeModal(modal.id); }));
-  document.addEventListener("keydown", (event) => { if (event.key === "Escape") $$(".modal.open").forEach((modal) => closeModal(modal.id)); });
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !event.defaultPrevented) $$(".modal.open").forEach((modal) => closeModal(modal.id)); });
   $("#login-form").addEventListener("submit", (event) => { event.preventDefault(); authenticate(false); });
   $("#register").addEventListener("click", () => authenticate(true));
   $("#open-reset").addEventListener("click", () => { closeModal("login-modal"); openModal("reset-modal"); $("#reset-username").focus(); });
@@ -1176,10 +1344,22 @@ function bindStaticEvents() {
     try { await navigator.clipboard.writeText($("#recovery-code").textContent); $("#copy-recovery").textContent = "Copied"; }
     catch { setNotice("Copy the recovery code manually.", true); }
   });
-  $("#review-form").addEventListener("submit", submitReview);
   $("#password-form").addEventListener("submit", changePassword);
   $("#import-library").addEventListener("click", importLibrary);
-  $("#logout").addEventListener("click", signOut);
+  $("#account-summary").addEventListener("click", (event) => {
+    const action = event.target.closest("[data-profile-action]")?.dataset.profileAction;
+    if (action === "public" && state.user) openReaderProfile(state.user.username);
+    if (action === "logout") signOut();
+  });
+  document.addEventListener("pointerdown", (event) => {
+    const readerMenu = $("#reader-menu");
+    if (readerMenu.open && !readerMenu.contains(event.target)) readerMenu.open = false;
+  });
+  $("#reader-menu").addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !event.currentTarget.open) return;
+    event.currentTarget.open = false;
+    $("summary", event.currentTarget).focus();
+  });
   $("#rotate-recovery").addEventListener("click", rotateRecoveryCode);
   $("#collection-form").addEventListener("submit", createSharedCollection);
   $("#request-novel").addEventListener("click", submitNovelRequest);
@@ -1190,18 +1370,24 @@ function bindStaticEvents() {
   $("#direct-form").addEventListener("submit", startDirectDiscovery);
   $("#search").addEventListener("click", () => runSearch(true));
   $("#query").addEventListener("keydown", (event) => { if (event.key === "Enter") runSearch(true); });
-  const tagDialog = $("#tag-dialog");
   $("#open-filters").addEventListener("click", () => {
-    tagDialog.showModal();
+    const panel = $("#tag-dialog");
+    if (panel.open) return closeFilters(true);
+    panel.show();
     $("#open-filters").setAttribute("aria-expanded", "true");
-    $("#tag-query").focus();
+    positionFilters();
+    renderTagCloud();
+    $("#tag-query").focus({ preventScroll: true });
   });
-  $("#close-filters").addEventListener("click", () => tagDialog.close());
-  $("#apply-filters").addEventListener("click", () => tagDialog.close());
-  tagDialog.addEventListener("close", () => $("#open-filters").setAttribute("aria-expanded", "false"));
-  tagDialog.addEventListener("click", (event) => {
-    if (event.target === tagDialog) tagDialog.close();
+  $("#close-filters").addEventListener("click", () => closeFilters(true));
+  document.addEventListener("pointerdown", (event) => {
+    if ($("#tag-dialog").open && !event.target.closest("#tag-dialog,#open-filters")) closeFilters();
   });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && $("#tag-dialog").open) closeFilters(true);
+  });
+  window.addEventListener("resize", positionFilters);
+  window.addEventListener("scroll", positionFilters, { passive: true });
   $("#tag-query").addEventListener("input", renderTagCloud);
   $("#clear-tags").addEventListener("click", () => { state.selectedTags.clear(); updateSelectedTags(); state.currentQuery ? runSearch(true) : loadCatalogue(true); });
   $("#load-more").addEventListener("click", loadNextPage);
@@ -1215,6 +1401,9 @@ async function bootstrap() {
   setAbsoluteMetadata();
   initRouting();
   initResultControls();
+  initCollectionControls();
+  initBookZoom();
+  initShelfMenus();
   bindStaticEvents();
   if (state.token) {
     try { state.user = await request("/auth/me"); }

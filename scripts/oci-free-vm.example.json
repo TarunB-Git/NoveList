@@ -1,0 +1,13 @@
+{
+  "profile": "DEFAULT",
+  "compartment_id": "ocid1.compartment.oc1..REPLACE",
+  "subnet_id": "ocid1.subnet.oc1.REGION.REPLACE",
+  "image_id": "ocid1.image.oc1.REGION.REPLACE",
+  "ssh_public_key_file": "~/.ssh/id_ed25519.pub",
+  "display_name": "novelist",
+  "ocpus": 2,
+  "memory_gb": 12,
+  "boot_volume_gb": 50,
+  "interval_seconds": 120,
+  "availability_domains": []
+}

@@ -1,0 +1,2 @@
+# Optional operator tooling; not installed in the application image.
+oci==2.187.1
