@@ -8,7 +8,7 @@ from pathlib import Path
 import time
 from typing import Any
 
-from collection import DATA_DIR, connection, list_items, now, profile
+from collection import DATA_DIR, VALID_TIERS, connection, list_items, now, profile, validate_rating
 from paths import INDEX_DIR
 
 _storage_cache: tuple[float, dict[str, Any]] | None = None
@@ -36,9 +36,9 @@ def initialise_community() -> None:
 
 def reader_analytics(user_id: int) -> dict[str, Any]:
     items = list_items(user_id)
-    summary = profile(user_id)
+    summary = profile(user_id, items)
     authors = Counter(item["author"] for item in items if item.get("author"))
-    source = Counter(item["status"] for item in items)
+    source = summary["status_counts"]
     return {
         **summary,
         "authors": [name for name, _ in authors.most_common(5)],
@@ -229,7 +229,7 @@ def add_to_collection(user_id: int, collection_id: int, novel_id: int) -> None:
                 book["title"],
                 book["author"],
                 book["cover_url"],
-                book["tier"] or "C",
+                book["tier"] if book["tier"] in VALID_TIERS else "C",
                 position,
             ),
         )
@@ -351,9 +351,9 @@ def collection_comments(collection_id: int) -> list[dict]:
         ]
 
 
-def add_review(user_id: int, novel_id: int, rating: int | None, body: str) -> dict:
-    if rating is not None and rating not in range(1, 6):
-        raise ValueError("Rating must be between 1 and 5")
+def add_review(user_id: int, novel_id: int, rating: float | None, body: str) -> dict:
+    if rating is not None:
+        validate_rating(rating)
     if not body.strip() or len(body) > 2000:
         raise ValueError("Reviews must be 1–2,000 characters")
     with connection() as conn:

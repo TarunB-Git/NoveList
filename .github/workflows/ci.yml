@@ -27,7 +27,9 @@ jobs:
       - name: Python lint
         run: ruff check --output-format github backend scripts tests
       - name: JavaScript syntax
-        run: node --check frontend/app.js
+        run: |
+          node --check frontend/app.js
+          node --check frontend/bookshelf.js
 
   checks:
     needs: lint
@@ -99,6 +101,39 @@ jobs:
           name: search-quality-report-${{ github.run_attempt }}
           path: ${{ runner.temp }}/search-quality.json
           if-no-files-found: error
+
+  container:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v3
+      - name: Build deployment image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: novelist-ci:smoke
+          cache-from: type=gha
+      - name: Start offline and serve the app
+        run: |
+          container=$(docker run -d --network none \
+            -e ADMIN_PASSWORD=local-smoke-test-password \
+            -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 novelist-ci:smoke)
+          trap 'docker rm -f "$container" >/dev/null' EXIT
+          base=http://127.0.0.1:8080
+          for attempt in {1..30}; do
+            if docker exec "$container" curl -fsS "$base/health"; then
+              for asset in / /styles.css /app.js /bookshelf.js /book-icons.svg /preview-covers.webp /shelf-vines.svg; do
+                docker exec "$container" curl -fsS -o /dev/null "$base$asset"
+              done
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs "$container"
+          exit 1
 
   deploy:
     needs: [lint, checks, search-quality]

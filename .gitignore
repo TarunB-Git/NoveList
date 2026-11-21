@@ -1,5 +1,8 @@
 .env
 .venv/
+.venv-cloud/
+.local/
+.oci/
 venv/
 __pycache__/
 *.py[cod]

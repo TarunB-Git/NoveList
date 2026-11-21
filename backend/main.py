@@ -56,9 +56,11 @@ from collection import (
     move_item,
     now,
     profile,
+    remove_item,
     save_item,
     set_tier,
     sync_catalogue_metadata,
+    trash_unlocked,
 )
 from community import (
     add_collection_comment,
@@ -293,7 +295,8 @@ class CollectionSaveRequest(BaseModel):
     status: Optional[
         Literal["reading", "completed", "dropped", "plan_to_read", "continue", "paused"]
     ] = None
-    rating: Optional[int] = Field(default=None, ge=1, le=5)
+    rating: Optional[float] = Field(default=None, ge=0.5, le=5, multiple_of=0.5)
+    tier: Optional[Literal["S", "A", "B", "C", "D"]] = None
 
 
 class LibraryImportRow(BaseModel):
@@ -313,7 +316,7 @@ class TierUpdateRequest(BaseModel):
 
 
 class TierMoveRequest(BaseModel):
-    tier: Literal["S", "A", "B", "C", "D"]
+    tier: Literal["S", "A", "B", "C", "D", "trash"]
     ordered_novel_ids: List[int]
 
 
@@ -334,7 +337,7 @@ class PasswordResetRequest(BaseModel):
 
 
 class ReviewRequest(BaseModel):
-    rating: Optional[int] = Field(default=None, ge=1, le=5)
+    rating: Optional[float] = Field(default=None, ge=0.5, le=5, multiple_of=0.5)
     body: str = Field(..., min_length=1, max_length=2000)
 
 
@@ -667,7 +670,13 @@ def auth_rotate_recovery_code(user: dict = Depends(user_from_request)):
 def get_collection(
     status: Optional[str] = Query(default=None), user: dict = Depends(user_from_request)
 ):
-    return {"items": list_items(user["id"], status), "profile": profile(user["id"])}
+    user_id = user["id"]
+    items = list_items(user_id, status)
+    return {
+        "items": items,
+        "profile": profile(user_id, None if status else items),
+        "trash_unlocked": trash_unlocked(user_id),
+    }
 
 
 @app.get("/profile", tags=["library"])
@@ -683,9 +692,14 @@ def save_to_collection(
     if novel.get("hand_authored"):
         novel["synopsis"] = ""
     try:
-        return save_item(user["id"], novel, req.status, req.rating)
+        return save_item(user["id"], novel, req.status, req.rating, tier=req.tier)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@app.delete("/collection/{novel_id}", status_code=204, tags=["library"])
+def delete_collection_item(novel_id: int, user: dict = Depends(user_from_request)):
+    remove_item(user["id"], novel_id)
 
 
 @app.post("/collection/import", tags=["library"])
@@ -778,6 +792,12 @@ def create_novel_request(
         return {"status": "received"}
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/novels/{novel_id}", tags=["data"])
+def get_novel(novel_id: int, request: Request):
+    _require_visible_novel(request, novel_id)
+    return _public_novel(_get_novel_by_id(novel_id))
 
 
 @app.get("/novels/{novel_id}/reviews", tags=["community"])
