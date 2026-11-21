@@ -1,6 +1,12 @@
-# Deploying NoveList on Render
+# Deploying novelist
 
 For a self-managed deployment, see the [Oracle VM guide](oracle-vm.md).
+
+## GitHub Actions and Azure
+
+Pull requests run lint, tests, the search quality gate, and a Docker smoke test. The smoke test starts the deployment image offline and checks that it serves the app and bookshelf assets. Merging into `main` triggers the Azure deployment after CI passes. [CI workflow](../.github/workflows/ci.yml)
+
+## Render
 
 NoveList is a single FastAPI process that also serves the frontend. Its two SQLite databases, cached covers, collector state, and search index live under `NOVELIST_DATA_DIR`. Keep that directory on a persistent disk. The repository does not contain catalogue records or covers.
 

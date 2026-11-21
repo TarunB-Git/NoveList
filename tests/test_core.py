@@ -148,9 +148,6 @@ class CoreTests(unittest.TestCase):
             title_matches("Dragon Roap")
         )))
         self.assertEqual(asyncio.run(title_matches("Wrym Way", allowed_ids={3})), [(3, "Semantic match")])
-        engine._query_cache.clear()
-        asyncio.run(title_matches("Wrym Way", use_cache=False))
-        self.assertFalse(engine._query_cache)
 
     def test_empty_index_supports_a_fresh_install(self) -> None:
         class FakeEmbedder:

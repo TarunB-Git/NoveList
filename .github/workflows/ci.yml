@@ -27,7 +27,9 @@ jobs:
       - name: Python lint
         run: ruff check --output-format github backend scripts tests
       - name: JavaScript syntax
-        run: node --check frontend/app.js
+        run: |
+          node --check frontend/app.js
+          node --check frontend/bookshelf.js
 
   checks:
     needs: lint
@@ -53,8 +55,88 @@ jobs:
       - name: Test
         run: make test
 
+  search-quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      OMP_NUM_THREADS: '2'
+      MKL_NUM_THREADS: '2'
+      PYTHONHASHSEED: '0'
+    steps:
+      - name: Initialize report
+        run: |
+          printf '%s\n' '{"status":"failed","errors":["Benchmark did not start; inspect earlier job steps."]}' \
+            > "$RUNNER_TEMP/search-quality.json"
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2
+          key: minilm-l6-v2-${{ runner.os }}-v1
+      - name: Install CPU search dependencies
+        run: |
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r backend/requirements.txt
+      - name: Build fictional fixture index
+        run: |
+          python scripts/build_index.py \
+            --data tests/search_quality_catalogue.json \
+            --index-dir "$RUNNER_TEMP/search-fixture-index"
+      - name: Enforce search quality
+        run: |
+          python scripts/benchmark_search.py \
+            --index-dir "$RUNNER_TEMP/search-fixture-index" \
+            --queries tests/search_quality_queries.json \
+            --mode hybrid-typo --min-hit-at-5 0.90 --min-single-typo-hit-at-5 0.90 \
+            | tee "$RUNNER_TEMP/search-quality.json"
+        shell: bash
+      - name: Upload search report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: search-quality-report-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/search-quality.json
+          if-no-files-found: error
+
+  container:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v3
+      - name: Build deployment image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: novelist-ci:smoke
+          cache-from: type=gha
+      - name: Start offline and serve the app
+        run: |
+          container=$(docker run -d --network none \
+            -e ADMIN_PASSWORD=local-smoke-test-password \
+            -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 novelist-ci:smoke)
+          trap 'docker rm -f "$container" >/dev/null' EXIT
+          base=http://127.0.0.1:8080
+          for attempt in {1..30}; do
+            if docker exec "$container" curl -fsS "$base/health"; then
+              for asset in / /styles.css /app.js /bookshelf.js /book-icons.svg /preview-covers.webp /shelf-vines.svg; do
+                docker exec "$container" curl -fsS -o /dev/null "$base$asset"
+              done
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs "$container"
+          exit 1
+
   deploy:
-    needs: [lint, checks]
+    needs: [lint, checks, search-quality]
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     permissions:
       contents: read
