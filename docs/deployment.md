@@ -1,6 +1,6 @@
 # Deploying NoveList on Render
 
-For options using free resources or existing student credit, see [hosting choices](hosting-options.md). The [Oracle retry tool](oracle-vm.md) can request a VM for the current disk-based application.
+For a self-managed deployment, see the [Oracle VM guide](oracle-vm.md).
 
 NoveList is a single FastAPI process that also serves the frontend. Its two SQLite databases, cached covers, collector state, and search index live under `NOVELIST_DATA_DIR`. Keep that directory on a persistent disk. The repository does not contain catalogue records or covers.
 

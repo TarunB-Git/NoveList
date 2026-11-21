@@ -44,6 +44,7 @@ test:
 lint:
 	ruff check backend scripts tests
 	node --check frontend/app.js
+	node --check frontend/bookshelf.js
 
 collect-all:
 	$(PYTHON) scripts/scrape_novels.py --site all --limit 100

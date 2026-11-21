@@ -270,6 +270,41 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(saved.json()["tier"], "S")
             library = client.get("/collection", headers=headers)
             self.assertEqual(library.json()["items"][0]["title"], "Dragon Road")
+            self.assertFalse(library.json()["trash_unlocked"])
+            rated = client.put("/collection/7", json={"rating": 3.5}, headers=headers)
+            self.assertEqual(rated.json()["personal_rating"], 3.5)
+            self.assertEqual(
+                client.put("/collection/7", json={"rating": 3.25}, headers=headers).status_code,
+                422,
+            )
+            posted = client.post(
+                "/novels/7/reviews",
+                json={"rating": 3.5, "body": "A convincing adventure."},
+                headers=headers,
+            )
+            self.assertEqual(posted.json()["rating"], 3.5)
+            for path in ("/collection/7", "/collection/7/tier"):
+                self.assertEqual(client.put(path, json={"tier": "trash"}, headers=headers).status_code, 422)
+            moved = client.put("/collection/7/move", json={"tier": "trash", "ordered_novel_ids": [7]}, headers=headers)
+            self.assertEqual(moved.status_code, 200)
+            self.assertEqual((moved.json()["tier"], moved.json()["tier_source"]), ("trash", "chosen"))
+            self.assertNotIn("trash", client.get("/profile", headers=headers).json()["tier_counts"])
+            shared = client.post("/shared-collections", json={"name": "Favourite books"}, headers=headers).json()
+            shared_path = f"/shared-collections/{shared['id']}"
+            self.assertEqual(client.post(f"{shared_path}/items", json={"novel_id": 7}, headers=headers).status_code, 200)
+            self.assertEqual(client.get(shared_path, headers=headers).json()["items"][0]["tier"], "C")
+            self.assertEqual(client.put(f"{shared_path}/items/7/move", json={"tier": "trash", "ordered_novel_ids": [7]}, headers=headers).status_code, 422)
+            self.assertEqual(client.delete("/collection/7").status_code, 401)
+            self.assertEqual(client.delete("/collection/7", headers=headers).status_code, 204)
+            library = client.get("/collection", headers=headers).json()
+            self.assertEqual(library["items"], [])
+            self.assertTrue(library["trash_unlocked"])
+            placed = client.put(
+                "/collection/7",
+                json={"status": "reading", "tier": "A"},
+                headers=headers,
+            ).json()
+            self.assertEqual((placed["status"], placed["tier"], placed["tier_source"]), ("reading", "A", "chosen"))
 
     def test_public_catalogue_preview_unlocks_after_sign_in(self) -> None:
         novels = [

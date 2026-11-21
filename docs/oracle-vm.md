@@ -189,4 +189,4 @@ NoveList needs a persistent data directory, HTTPS termination, and an independen
 5. Configure a reverse proxy with HTTPS, point your subdomain at the VM, and permit 80/443 in the OCI security list and guest firewall. Preserve Oracle's platform firewall rules when adjusting the guest firewall.
 6. Retain an encrypted backup off the VM and test restore using the [backup procedure](deployment.md#back-up-and-restore).
 
-The retry script performs none of these deployment steps. See [hosting alternatives](hosting-options.md) while waiting for capacity.
+After provisioning, complete these steps from the VM host. [Render deployment guide](deployment.md)
