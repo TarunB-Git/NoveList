@@ -140,4 +140,13 @@ SOFTWARE.
   <symbol id="Trash2" viewBox="0 0 24 24">
     <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M10 11v6m4-6v6"/>
   </symbol>
+  <symbol id="LayoutCovers" viewBox="0 0 24 24">
+    <rect x="3" y="4" width="7" height="16" rx="1"/><rect x="14" y="4" width="7" height="16" rx="1"/>
+  </symbol>
+  <symbol id="LayoutList" viewBox="0 0 24 24">
+    <path d="M8 5h13M8 12h13M8 19h13M3 5h.01M3 12h.01M3 19h.01"/>
+  </symbol>
+  <symbol id="LayoutCompact" viewBox="0 0 24 24">
+    <path d="M3 4h4v6H3zm7 0h4v6h-4zm7 0h4v6h-4zM3 14h4v6H3zm7 0h4v6h-4zm7 0h4v6h-4z"/>
+  </symbol>
 </svg>

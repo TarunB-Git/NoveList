@@ -68,14 +68,19 @@ from community import (
     add_to_collection,
     collection_comments,
     create_collection,
+    create_discussion,
     featured_favorites,
     follow_collection,
     get_collection as get_shared_collection,
+    get_discussion,
     initialise_community,
     list_collections,
     list_novel_requests,
     move_collection_item as move_shared_collection_item,
+    owner_favorites,
     public_reader_profile,
+    recent_discussions,
+    reply_to_discussion,
     reader_analytics,
     request_novel,
     reviews,
@@ -352,6 +357,14 @@ class SharedCollectionRequest(BaseModel):
     visibility: Literal["public", "private"] = "public"
 
 
+class DiscussionReplyRequest(BaseModel):
+    body: str = Field(..., min_length=1, max_length=2000)
+
+
+class DiscussionRequest(DiscussionReplyRequest):
+    title: str = Field(..., min_length=1, max_length=120)
+
+
 class AddSharedItemRequest(BaseModel):
     novel_id: int
 
@@ -507,21 +520,8 @@ def browse_catalogue(
     sort: Literal["recent", "title", "random"] = Query(default="recent"),
 ):
     eng = _get_engine()
-    wanted = {tag.casefold().strip() for tag in tags if tag.strip()}
     visible = _visible_catalogue(request)
-    novels = [
-        novel
-        for novel in visible
-        if not wanted
-        or wanted.issubset({str(tag).casefold() for tag in novel.get("tags", [])})
-    ]
-    if sort == "title":
-        novels.sort(key=lambda novel: str(novel.get("title", "")).casefold())
-    elif sort == "random":
-        # A stable seed keeps page boundaries intact for the current day.
-        random.Random(now()[:10]).shuffle(novels)
-    else:
-        novels.sort(key=lambda novel: int(novel.get("id") or 0), reverse=True)
+    novels = _browse_novels(visible, tags, sort)
     total = len(novels)
     start = (page - 1) * page_size
     return {
@@ -535,6 +535,59 @@ def browse_catalogue(
         "page_size": page_size,
         "pages": max(1, (total + page_size - 1) // page_size),
         "has_more": start + page_size < total,
+    }
+
+
+def _browse_novels(visible: list[dict], tags: list[str], sort: str) -> list[dict]:
+    wanted = {tag.casefold().strip() for tag in tags if tag.strip()}
+    novels = [
+        novel
+        for novel in visible
+        if not wanted
+        or wanted.issubset({str(tag).strip().casefold() for tag in novel.get("tags", [])})
+    ]
+    if sort == "title":
+        novels.sort(key=lambda novel: str(novel.get("title", "")).casefold())
+    elif sort == "random":
+        # A stable seed keeps page boundaries intact for the current day.
+        random.Random(now()[:10]).shuffle(novels)
+    else:
+        novels.sort(key=lambda novel: int(novel.get("id") or 0), reverse=True)
+    return novels
+
+
+@app.get("/catalogue/shelves", tags=["data"])
+def browse_shelves(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    shelf: str | None = Query(default=None, max_length=300),
+    tags: List[str] = Query(default=[]),
+    sort: Literal["recent", "title", "random"] = Query(default="recent"),
+):
+    books_per_page, shelves_per_page = 24, 5
+    novels = _browse_novels(_visible_catalogue(request), tags, sort)
+    groups: dict[str, tuple[str, list[dict]]] = {}
+    for novel in novels:
+        names = {str(tag).strip().casefold(): str(tag).strip() for tag in novel.get("tags", []) if str(tag).strip()}
+        for key, name in (names or {"": "Untagged"}).items():
+            if shelf is None or key == shelf:
+                groups.setdefault(key, (name, []))[1].append(novel)
+    if shelf is not None:
+        books = groups.get(shelf, ("", []))[1]
+        start = (page - 1) * books_per_page
+        return {"items": [_public_novel(book) for book in books[start:start + books_per_page]], "has_more": start + books_per_page < len(books)}
+
+    keys = sorted(groups, key=lambda key: (-len(groups[key][1]), key))
+    start = (page - 1) * shelves_per_page
+    return {
+        "shelves": [
+            {"tag": key, "title": groups[key][0], "books": [_public_novel(book) for book in groups[key][1][:books_per_page]],
+             "has_more": len(groups[key][1]) > books_per_page}
+            for key in keys[start:start + shelves_per_page]
+        ],
+        "total": len(novels),
+        "has_more": start + shelves_per_page < len(keys),
+        "demo": _demo_catalogue(),
     }
 
 
@@ -591,6 +644,14 @@ def catalogue_stats(request: Request):
 def catalogue_featured(request: Request, limit: int = Query(default=12, ge=1, le=24)):
     allowed = {novel["id"] for novel in _visible_catalogue(request)}
     return {"items": [item for item in featured_favorites(24) if item["novel_id"] in allowed][:limit]}
+
+
+@app.get("/favorites", tags=["community"])
+def get_owner_favorites():
+    items = owner_favorites()
+    for book in items:
+        book["cover_url"] = _catalogue_url(book["cover_url"])
+    return {"items": items}
 
 
 @app.get("/profiles/{username}", tags=["community"])
@@ -819,12 +880,40 @@ def create_review(
 
 @app.get("/shared-collections", tags=["community"])
 def get_shared_collections(request: Request):
+    user = _optional_user(request)
+    catalogue = _get_engine().metadata if user else _visible_catalogue(request)
+    visible_ids = {novel["id"] for novel in catalogue}
+    collections = list_collections(user["id"] if user else None, visible_ids)
+    for entry in collections:
+        for book in entry["books"][:3]:
+            book["cover_url"] = _catalogue_url(book["cover_url"])
+    return {"collections": collections, "discussion": recent_discussions()}
+
+
+@app.post("/discussions", status_code=201, tags=["community"])
+def post_discussion(req: DiscussionRequest, user: dict = Depends(user_from_request)):
     try:
-        user = user_from_request(request)
-        viewer_id = user["id"]
-    except HTTPException:
-        viewer_id = None
-    return {"collections": list_collections(viewer_id)}
+        return {"id": create_discussion(user["id"], req.title, req.body)}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/discussions/{thread_id}", tags=["community"])
+def read_discussion(thread_id: int):
+    try:
+        return get_discussion(thread_id)
+    except KeyError as exc:
+        raise HTTPException(404, "Discussion not found") from exc
+
+
+@app.post("/discussions/{thread_id}/replies", status_code=201, tags=["community"])
+def post_discussion_reply(thread_id: int, req: DiscussionReplyRequest, user: dict = Depends(user_from_request)):
+    try:
+        return {**reply_to_discussion(user["id"], thread_id, req.body), "username": user["username"]}
+    except KeyError as exc:
+        raise HTTPException(404, "Discussion not found") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.post("/shared-collections", tags=["community"])
@@ -905,13 +994,19 @@ def put_follow_collection(
 
 
 @app.get("/shared-collections/{collection_id}/comments", tags=["community"])
-def get_collection_comments(collection_id: int):
-    return {"comments": collection_comments(collection_id)}
+def get_collection_comments(collection_id: int, request: Request):
+    user = _optional_user(request)
+    try:
+        return {"comments": collection_comments(collection_id, user["id"] if user else None)}
+    except KeyError as exc:
+        raise HTTPException(404, "Collection not found") from exc
+    except PermissionError as exc:
+        raise HTTPException(403, "This collection is private") from exc
 
 
 @app.post("/shared-collections/{collection_id}/comments", tags=["community"])
 def post_collection_comment(
-    collection_id: int, req: ReviewRequest, user: dict = Depends(user_from_request)
+    collection_id: int, req: DiscussionReplyRequest, user: dict = Depends(user_from_request)
 ):
     try:
         return add_collection_comment(user["id"], collection_id, req.body)

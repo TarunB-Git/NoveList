@@ -17,6 +17,7 @@ const VIEW_TITLES = {
   models: "How NoveList works",
   analytics: "Reading analytics",
   community: "Community collections",
+  favorites: "My favorites",
   account: "Reader profile",
   admin: "Catalogue administration",
   faq: "Frequently asked questions",
@@ -28,6 +29,7 @@ const VIEW_DESCRIPTIONS = {
   models: "See how catalogue search and personal tier suggestions work.",
   analytics: "Explore reading-state, ranking, taste, activity, and storage analytics.",
   community: "Follow reader tier lists, publish collections, reviews, and comments.",
+  favorites: "The novelist owner’s S-tier bookshelf.",
   account: "View your reader profile, import a library, and manage account security.",
   admin: "Run controlled catalogue discovery and metadata collection jobs.",
   faq: "Answers about ranking, metadata, covers, requests, and reader data.",
@@ -41,15 +43,21 @@ const state = {
   trashUnlocked: false,
   libraryRequest: 0,
   activeStatus: "all",
-  tierDisplay: shelfLayout(localStorage.getItem("novellist-tier-display")) || "shelf",
-  resultLayout: localStorage.getItem("novellist-results-layout") || "shelf",
-  libraryLayout: localStorage.getItem("novellist-library-layout") || "shelf",
+  bookLayout: shelfLayout(localStorage.getItem("novellist-book-layout") || localStorage.getItem("novellist-results-layout")) || "shelf",
   cabinetOpen: false,
   reviewSuggestions: false,
+  reviewBookId: null,
   catalogueRequest: 0,
   resultSort: localStorage.getItem("novellist-results-sort") || "recent",
   results: [],
+  discoverGroups: [],
+  genreBrowse: null,
   currentQuery: "",
+  scopedQueries: {},
+  collections: [],
+  discussions: [],
+  communityPanel: "collections",
+  favorites: [],
   selectedTags: new Set(),
   catalogueTags: [],
   page: 1,
@@ -80,6 +88,7 @@ async function request(path, options = {}) {
   try {
     response = await fetch(API + path, { ...options, headers });
   } catch {
+    if (options.signal?.aborted) throw options.signal.reason;
     throw new Error(`Could not reach the service at ${API}. Check the server address and try again.`);
   }
   if (!response.ok) {
@@ -163,17 +172,18 @@ function bindCoverFallbacks(root = document) {
 function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
   localStorage.setItem("novellist-theme", theme);
-  $("#theme").textContent = theme === "dark" ? "Light" : "Dark";
-  $("#reader-theme").textContent = theme === "dark" ? "Light appearance" : "Dark appearance";
+  const label = `Switch to ${theme === "dark" ? "light" : "dark"} mode`;
+  $("#theme").setAttribute("aria-label", label);
+  $("#theme").title = label;
 }
 
 function initTheme() {
   const saved = localStorage.getItem("novellist-theme");
   setTheme(saved || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"));
-  $$("[data-theme-toggle]").forEach((button) => button.addEventListener("click", () => {
+  $("#theme").addEventListener("click", () => {
     setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
     $("#reader-menu").open = false;
-  }));
+  });
 }
 
 function currentView() {
@@ -240,14 +250,23 @@ function showView(viewName = currentView()) {
   });
   positionTabIndicator();
   document.body.dataset.view = viewName;
+  syncScopedSearch(viewName);
+  syncLayoutControl(viewName);
+  const notice = $("#notice");
+  if (viewName === "library") $("#library-toolbar").append(notice);
+  else $("#route-stage").before(notice);
   document.title = `${VIEW_TITLES[viewName]} | novelist`;
   $('meta[name="description"]').setAttribute("content", VIEW_DESCRIPTIONS[viewName]);
   $('meta[property="og:title"]').setAttribute("content", `${VIEW_TITLES[viewName]} | novelist`);
   $('meta[property="og:description"]').setAttribute("content", VIEW_DESCRIPTIONS[viewName]);
   if (viewName === "analytics") renderAnalytics();
   if (viewName === "community") renderCommunity();
+  if (viewName === "favorites") renderFavorites();
   if (viewName === "account") renderAccount();
   if (viewName === "admin") refreshJobs();
+  if (viewName === "library") balanceCabinetShelves();
+  if (viewName === "discover") packDiscoverSections();
+  queueSpineTitles();
 }
 
 function navigateTo(view) {
@@ -280,7 +299,7 @@ function updatePreview(data) {
   const limited = !state.user;
   $("#preview-banner").hidden = !limited;
   if (limited) {
-    $("#preview-copy").textContent = "Fictional catalogue preview";
+    $("#preview-copy").textContent = "Preview with classics and sample novels";
   }
 }
 
@@ -383,11 +402,207 @@ function toggleTag(tag) {
   if (state.currentQuery) runSearch(true); else loadCatalogue(true);
 }
 
+const SEARCH_SCOPES = {
+  discover: ["Search catalogue", "Title or story idea"],
+  library: ["Search library", "Find a saved novel"],
+  tiers: ["Search tier list", "Find a novel on your tier list"],
+  community: ["Search community", "Collection, reader, or novel"],
+};
+
+let searchOptions = [];
+let activeSearchOption = -1;
+let searchTimer;
+let suggestionRequest;
+
+function clearSuggestions() {
+  clearTimeout(searchTimer);
+  suggestionRequest?.abort();
+  searchOptions = [];
+  activeSearchOption = -1;
+  $("#search-suggestions").hidden = true;
+  $("#query").setAttribute("aria-expanded", "false");
+  $("#query").removeAttribute("aria-activedescendant");
+}
+
+function syncScopedSearch(view) {
+  clearSuggestions();
+  const scope = SEARCH_SCOPES[view];
+  $("#discover-search").hidden = !scope;
+  $("#open-filters").hidden = view !== "discover";
+  $("#browse-sort").hidden = view !== "discover" || Boolean(state.currentQuery);
+  if (!scope) return;
+  $("#discover-search").setAttribute("aria-label", scope[0]);
+  $("#search-label").textContent = scope[0];
+  $("#query").placeholder = view === "community" && state.communityPanel === "discussion" ? "Collection or comment" : scope[1];
+  $("#query").value = view === "discover" ? state.currentQuery : state.scopedQueries[view] || "";
+}
+
+function searchText(value) {
+  return String(value || "").normalize("NFKD").toLocaleLowerCase().replace(/\p{M}/gu, "").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+function scopedMatches(items, query) {
+  const text = searchText(query);
+  if (!text) return items;
+  const terms = text.split(" ");
+  return items.flatMap((item) => {
+    const name = searchText(item.title || item.name);
+    const meta = searchText([item.author, item.username, item.description, item.synopsis,
+      ...(item.tags || []), ...(item.title_aliases || [])].filter(Boolean).join(" "));
+    if (!terms.every((term) => name.includes(term) || meta.includes(term))) return [];
+    const score = Number(name === text) * 10 + Number(name.startsWith(text)) * 4 + terms.filter((term) => name.includes(term)).length;
+    return [{ item, score }];
+  }).sort((a, b) => b.score - a.score).map(({ item }) => item);
+}
+
+function communityBookMatches(query) {
+  return state.collections.flatMap((collection) => scopedMatches(collection.books || [], query)
+    .map((book) => ({ ...book, collectionId: collection.id, collectionName: collection.name })));
+}
+
+function communityMatches(query, books = communityBookMatches(query)) {
+  const matches = new Map(scopedMatches(state.collections, query).map((collection) => [collection.id, collection]));
+  const bookCollections = new Set(books.map((book) => book.collectionId));
+  for (const collection of state.collections) {
+    if (bookCollections.has(collection.id)) matches.set(collection.id, collection);
+  }
+  return [...matches.values()];
+}
+
+function queueSuggestions() {
+  clearSuggestions();
+  const input = $("#query");
+  const query = input.value.trim();
+  const view = document.body.dataset.view;
+  if (!query || !SEARCH_SCOPES[view]) return;
+  const controller = new AbortController();
+  suggestionRequest = controller;
+  searchTimer = setTimeout(async () => {
+    try {
+      let matches;
+      if (view === "discover") {
+        if (state.user) {
+          if (query.length < 2) return;
+          const data = await request("/search", {
+            method: "POST", headers: { "Content-Type": "application/json" }, signal: controller.signal,
+            body: JSON.stringify({ query, top_k: 6, page_size: 6, tags: [...state.selectedTags] }),
+          });
+          matches = data.results;
+        } else {
+          matches = previewMatches(query);
+        }
+      } else if (view === "community") {
+        if (state.communityPanel === "discussion") matches = scopedMatches(state.discussions, query);
+        else {
+          const books = communityBookMatches(query);
+          matches = [...books.slice(0, 4), ...communityMatches(query, books)];
+        }
+      } else {
+        matches = scopedMatches(view === "tiers" ? state.items.filter((item) => item.tier) : state.items, query);
+      }
+      if (controller.signal.aborted) return;
+      searchOptions = matches.slice(0, 6);
+      if (!searchOptions.length) return;
+      const list = $("#search-suggestions");
+      list.innerHTML = searchOptions.map((item, index) => {
+        const detail = item.collectionName || item.author || item.username;
+        return `<button type="button" class="search-option" id="search-option-${index}" role="option" tabindex="-1" data-search-option="${index}" aria-selected="false"><span>${escapeHTML(item.title || item.name)}</span>${detail ? `<small>${escapeHTML(detail)}</small>` : ""}</button>`;
+      }).join("");
+      list.hidden = false;
+      input.setAttribute("aria-expanded", "true");
+    } catch (error) {
+      if (!controller.signal.aborted && error.name !== "AbortError") clearSuggestions();
+    }
+  }, view === "discover" && state.user ? 180 : 50);
+}
+
+async function submitScopedSearch(option, keyboard = false) {
+  const view = document.body.dataset.view;
+  const query = (option?.title || option?.name || $("#query").value).trim();
+  clearSuggestions();
+  closeBookMenu();
+  if (option) $("#query").value = query;
+  if (view === "discover") {
+    await runSearch(true, query);
+  } else {
+    state.scopedQueries[view] = query;
+    if (view === "library") {
+      if (query) {
+        state.activeStatus = "all";
+        state.cabinetOpen = true;
+      }
+      drawLibrary();
+    }
+    if (view === "tiers") drawTierboard();
+    if (view === "community") {
+      drawCommunity();
+      if (option?.thread_id) openDiscussion(option.thread_id);
+      else if (option?.collection_id) openCollection(option.collection_id, { discussion: true, keyboard });
+      else if (option) openCollection(option.collectionId || option.id, { novelId: option.novel_id, keyboard });
+      return;
+    }
+  }
+  if (!option || view !== document.body.dataset.view) return;
+  const book = $(`[data-book-key="${bookID(option)}"]`, document.getElementById(view));
+  if (!book) return;
+  book.scrollIntoView({ block: "nearest", inline: "nearest" });
+  if (book.matches(BOOK_TRIGGER)) openBookMenu(book, { pin: true, keyboard });
+  else $("input", book)?.focus({ preventScroll: true });
+}
+
+function bindScopedSearch() {
+  const form = $("#discover-search");
+  const input = $("#query");
+  const list = $("#search-suggestions");
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    submitScopedSearch();
+  });
+  input.addEventListener("input", () => {
+    const view = document.body.dataset.view;
+    const applied = view === "discover" ? state.currentQuery : state.scopedQueries[view];
+    if (!input.value && applied) submitScopedSearch();
+    else queueSuggestions();
+  });
+  input.addEventListener("focus", queueSuggestions);
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !list.hidden) {
+      event.preventDefault();
+      clearSuggestions();
+    }
+    if (event.key === "Enter" && activeSearchOption >= 0) {
+      event.preventDefault();
+      submitScopedSearch(searchOptions[activeSearchOption], true);
+    }
+    if (!searchOptions.length || !["ArrowDown", "ArrowUp"].includes(event.key)) return;
+    event.preventDefault();
+    const last = searchOptions.length - 1;
+    activeSearchOption = event.key === "ArrowDown"
+      ? (activeSearchOption + 1) % searchOptions.length
+      : activeSearchOption <= 0 ? last : activeSearchOption - 1;
+    const active = list.children[activeSearchOption];
+    $$("[role=option]", list).forEach((option) => option.setAttribute("aria-selected", String(option === active)));
+    input.setAttribute("aria-activedescendant", active.id);
+    active.scrollIntoView({ block: "nearest" });
+  });
+  list.addEventListener("pointerdown", (event) => event.preventDefault());
+  list.addEventListener("click", (event) => {
+    const option = event.target.closest("[data-search-option]");
+    if (option) submitScopedSearch(searchOptions[Number(option.dataset.searchOption)]);
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (!form.contains(event.target)) clearSuggestions();
+  });
+  input.addEventListener("blur", clearSuggestions);
+}
+
 function invalidateCatalogue() {
   state.catalogueRequest++;
   state.loading = false;
   state.hasMore = false;
   state.results = [];
+  state.discoverGroups = [];
+  clearGenreBrowse();
   $("#search").disabled = false;
   closeBookMenu();
 }
@@ -398,11 +613,12 @@ async function loadCatalogue(reset = false) {
     closeBookMenu();
     state.page = 1;
     state.currentQuery = "";
-    $("#browse-sort").hidden = false;
     state.resultSort = resultSortForBrowse();
     $("#result-sort").value = state.resultSort;
-    $("#query").value = "";
+    if (document.body.dataset.view === "discover") syncScopedSearch("discover");
   }
+  if (state.bookLayout === "shelf") return loadGenrePage(reset);
+  clearGenreBrowse();
   const params = new URLSearchParams({ page: state.page, page_size: 40, sort: resultSortForBrowse() });
   state.selectedTags.forEach((tag) => params.append("tags", tag));
   await refreshResults(reset, async () => {
@@ -414,15 +630,16 @@ async function loadCatalogue(reset = false) {
   });
 }
 
-async function runSearch(reset = true) {
-  const query = (reset ? $("#query").value : state.currentQuery).trim();
+async function runSearch(reset = true, queryText = state.currentQuery) {
+  const query = queryText.trim();
   if (!query) return loadCatalogue(true);
   if (state.loading && !reset) return;
   if (reset) {
     closeBookMenu();
+    clearGenreBrowse();
     state.page = 1;
     state.currentQuery = query;
-    $("#browse-sort").hidden = true;
+    if (document.body.dataset.view === "discover") $("#browse-sort").hidden = true;
   }
   const body = { query, top_k: 600, page: state.page, page_size: 30, tags: [...state.selectedTags] };
   await refreshResults(reset, async () => state.user ? request("/search", {
@@ -444,10 +661,9 @@ async function refreshResults(reset, load, query = "") {
     state.results = reset ? items : mergeUnique(state.results, items);
     state.hasMore = data.has_more;
     updatePreview(data);
-    $("#results-title").textContent = query ? `Results for “${query}”` : "Discover";
     const total = query ? state.results.length : data.total;
     $("#results-count").textContent = `${total.toLocaleString()} ${total === 1 ? "novel" : "novels"}${query && data.has_more ? " shown" : ""}`;
-    renderResults();
+    renderResults({ append: !reset });
     if (query && reset && state.user) maybeStartExactDiscovery(query, items);
   } catch (error) {
     if (generation !== state.catalogueRequest) return;
@@ -515,10 +731,12 @@ async function requestExactTitle(title) {
   } catch (error) { setNotice(error.message, true); }
 }
 
-function renderResults() {
+function renderResults({ append = false } = {}) {
   const target = $("#results");
   const books = state.results;
-  const layout = state.resultLayout;
+  const layout = state.bookLayout;
+  const keepBooks = append && target.dataset.layout === layout && $(".book-section", target);
+  const anchor = keepBooks ? discoverScrollAnchor(target) : null;
   target.className = "book-collection discovery-books";
   target.dataset.layout = layout;
   if (!books.length) {
@@ -528,32 +746,191 @@ function renderResults() {
   }
   const groups = state.currentQuery
     ? [{ title: "Search results", books }]
-    : groupDiscoverBooks(books);
-  drawBookGroups(target, groups, layout);
+    : groupDiscoverBooks(books, keepBooks ? state.discoverGroups : []);
+  state.discoverGroups = groups;
+  if (keepBooks) syncBookGroups(target, groups, layout);
+  else drawBookGroups(target, groups, layout);
+  packDiscoverSections(Boolean(keepBooks));
+  if (anchor?.book.isConnected) {
+    const shift = anchor.book.getBoundingClientRect().top - anchor.top;
+    if (Math.abs(shift) >= 1) window.scrollBy({ top: shift, behavior: "instant" });
+  }
   restoreBookAnchor();
   updatePagination();
 }
 
-function groupDiscoverBooks(books) {
+function discoverScrollAnchor(target) {
+  if (document.body.dataset.view !== "discover" || !window.scrollY) return null;
+  const header = $(".site-header").getBoundingClientRect().bottom;
+  for (const book of $$("[data-book-key]", target)) {
+    const box = book.getBoundingClientRect();
+    if (box.bottom > header && box.top < innerHeight && box.left < innerWidth && box.right > 0) {
+      return { book, top: box.top };
+    }
+  }
+  return null;
+}
+
+function packDiscoverSections(keepWidths = false) {
+  const target = $("#results");
+  const layout = target.dataset.layout;
+  if (!target.clientWidth || !["shelf", "grid", "dense"].includes(layout)) return;
+  const zoom = Number($("#header-zoom-slider").value) / 100;
+  for (const section of $$(":scope > .book-section", target)) {
+    if (keepWidths && section.style.getPropertyValue("--genre-width")) continue;
+    const books = $$("[data-book-key]", section);
+    const width = layout === "shelf"
+      ? books.reduce((total, book) => total + $(".book-spine", book).offsetWidth + 3, 18)
+      : books.length * (layout === "grid" ? 122 * zoom + 16 : Math.max(86, 92 * zoom) + 6);
+    section.style.setProperty("--genre-width", `${Math.ceil(Math.max(158, width))}px`);
+  }
+}
+
+const genreRows = new WeakMap();
+const genreVisibility = new IntersectionObserver((entries) => {
+  for (const entry of entries) if (entry.isIntersecting) maybeLoadShelfBooks(entry.target);
+}, { rootMargin: "140px" });
+
+function clearGenreBrowse() {
+  state.genreBrowse?.rows.forEach((row) => genreVisibility.unobserve(row));
+  state.genreBrowse = null;
+}
+
+function genreParams(browse, page) {
+  const params = new URLSearchParams({ page, sort: browse.sort });
+  browse.tags.forEach((tag) => params.append("tags", tag));
+  return params;
+}
+
+async function loadGenrePage(reset = false) {
+  if (reset) {
+    invalidateCatalogue();
+    state.genreBrowse = { page: 0, sort: resultSortForBrowse(), tags: [...state.selectedTags], rows: [] };
+    $("#catalogue-end").replaceChildren();
+  }
+  const browse = state.genreBrowse;
+  if (!browse || state.loading) return;
+  const page = browse.page + 1;
+  const target = $("#results");
+  state.loading = true;
+  target.setAttribute("aria-busy", "true");
+  updatePagination();
+  try {
+    let result;
+    if (state.user) {
+      result = await request(`/catalogue/shelves?${genreParams(browse, page)}`);
+    } else {
+      const books = previewMatches();
+      if (browse.sort === "title") books.sort((a, b) => a.title.localeCompare(b.title));
+      if (browse.sort === "random") books.sort((a, b) => ((bookID(a) * 2654435761) >>> 0) - ((bookID(b) * 2654435761) >>> 0));
+      result = { total: books.length, demo: true, has_more: false, shelves: PREVIEW_SECTIONS.map((title, section) => ({
+        tag: title, title, books: books.filter((book) => book.section === section), has_more: false,
+      })).filter((shelf) => shelf.books.length) };
+    }
+    if (state.genreBrowse !== browse) return;
+    browse.page = page;
+    state.hasMore = result.has_more;
+    updatePreview(result);
+    $("#results-count").textContent = `${result.total.toLocaleString()} ${result.total === 1 ? "novel" : "novels"}`;
+    if (reset) {
+      target.dataset.layout = "shelf";
+      target.replaceChildren();
+    }
+    if (!result.shelves.length && reset) target.innerHTML = '<div class="empty">No novels match these filters.</div>';
+    for (const shelf of result.shelves) {
+      const section = shelfElement(groupMarkup([shelf], "shelf"));
+      target.append(section);
+      const row = $(".book-row", section);
+      $$('[data-book-key]', row).forEach((trigger, index) => bindShelfBook(trigger, shelf.books[index]));
+      row.tabIndex = 0;
+      row.setAttribute("aria-label", shelf.title);
+      const pager = { browse, shelf, page: 1, loading: false, seen: new Set(shelf.books.map(bookID)) };
+      genreRows.set(row, pager);
+      browse.rows.push(row);
+      if (shelf.has_more) {
+        row.addEventListener("scroll", () => maybeLoadShelfBooks(row), { passive: true });
+        genreVisibility.observe(row);
+      }
+    }
+    packDiscoverSections(!reset);
+    queueSpineTitles();
+  } catch (error) {
+    if (state.genreBrowse === browse) {
+      if (reset) target.innerHTML = `<div class="empty">${escapeHTML(error.message)}</div>`;
+      else setNotice(error.message, true);
+    }
+  } finally {
+    if (state.genreBrowse === browse) {
+      state.loading = false;
+      target.removeAttribute("aria-busy");
+      updatePagination();
+      if (browse.page === page && state.hasMore && document.body.dataset.view === "discover") {
+        requestAnimationFrame(() => {
+          if (state.genreBrowse === browse && $("#scroll-sentinel").getBoundingClientRect().top <= innerHeight + 120) loadNextPage();
+        });
+      }
+    }
+  }
+}
+
+async function maybeLoadShelfBooks(row) {
+  const pager = genreRows.get(row);
+  if (!pager || !pager.shelf.has_more || pager.loading || pager.browse !== state.genreBrowse ||
+      !row.clientWidth || document.body.dataset.view !== "discover" || row.scrollWidth - row.clientWidth - row.scrollLeft > 120) return;
+  pager.loading = true;
+  row.setAttribute("aria-busy", "true");
+  try {
+    const params = genreParams(pager.browse, pager.page + 1);
+    params.set("shelf", pager.shelf.tag);
+    const data = await request(`/catalogue/shelves?${params}`);
+    if (!row.isConnected || state.genreBrowse !== pager.browse) return;
+    pager.page++;
+    pager.shelf.has_more = data.has_more;
+    if (!data.has_more) genreVisibility.unobserve(row);
+    for (const book of data.items) {
+      const id = bookID(book);
+      if (pager.seen.has(id)) continue;
+      pager.seen.add(id);
+      const trigger = shelfElement(bookMarkup(book, "shelf"));
+      row.append(trigger);
+      bindShelfBook(trigger, book);
+    }
+    queueSpineTitles();
+  } catch (error) {
+    if (row.isConnected && state.genreBrowse === pager.browse) setNotice(error.message, true);
+  } finally {
+    pager.loading = false;
+    row.removeAttribute("aria-busy");
+    if (!row.isConnected) genreVisibility.unobserve(row);
+  }
+}
+
+function groupDiscoverBooks(books, previous = []) {
+  if (!state.user && !state.selectedTags.size) {
+    return PREVIEW_SECTIONS.map((title, section) => ({ title, books: books.filter((book) => book.section === section) }));
+  }
   const tagKey = (tag) => tag.toLocaleLowerCase();
   const catalogueTags = new Map(state.catalogueTags.map((tag) => [tagKey(tag.name), tag]));
   const featured = new Set([...state.catalogueTags]
     .sort((a, b) => b.count - a.count).slice(0, 8).map((tag) => tagKey(tag.name)));
   const selected = new Set([...state.selectedTags].map(tagKey));
-  const shelves = new Map();
+  const shelves = new Map(previous.map((group) => [group.key, { ...group, books: [...group.books] }]));
+  const placed = new Set(previous.flatMap((group) => group.books.map(bookID)));
   const tagCount = (tag) => catalogueTags.get(tag)?.count || 1;
   const placeScore = (tag) => Math.log2(tagCount(tag) + 1) / (1 + (shelves.get(tag)?.books.length || 0) * .35);
   for (const book of books) {
+    if (placed.has(bookID(book))) continue;
     const tags = new Map((book.tags || []).map((tag) => [tagKey(tag), tag]));
     const matches = [...tags.keys()].filter((tag) => featured.has(tag));
     const preferred = [...tags.keys()].find((tag) => selected.has(tag));
     const candidates = matches.length ? matches : [...tags.keys()];
     const key = preferred || candidates.sort((a, b) => placeScore(b) - placeScore(a))[0] || "";
     if (!shelves.has(key)) {
-      shelves.set(key, { title: catalogueTags.get(key)?.name || tags.get(key) || "Untagged", books: [] });
+      shelves.set(key, { key, title: catalogueTags.get(key)?.name || tags.get(key) || "Untagged", books: [] });
     }
     shelves.get(key).books.push(book);
   }
+  if (previous.length) return [...shelves.values()];
   const ordered = [...shelves.keys()].sort((a, b) =>
     Number(Boolean(b)) - Number(Boolean(a)) || tagCount(b) - tagCount(a) || a.localeCompare(b));
   return ordered.map((tag) => shelves.get(tag));
@@ -563,27 +940,43 @@ function updatePagination() {
   const button = $("#load-more");
   button.hidden = !state.hasMore;
   button.disabled = state.loading;
-  button.textContent = state.loading ? "Loading" : "Load more";
+  button.textContent = state.loading ? "Loading" : state.genreBrowse ? "More shelves" : "Load more";
   if (state.hasMore) $("#catalogue-end").textContent = "";
 }
 
 async function loadNextPage() {
   if (!state.hasMore || state.loading) return;
+  if (state.genreBrowse) return loadGenrePage();
   state.page += 1;
   if (state.currentQuery) await runSearch(false); else await loadCatalogue(false);
 }
 
+const BOOK_VIEWS = new Set(["discover", "library", "tiers", "favorites"]);
+
+function syncLayoutControl(view) {
+  const control = $("#book-layout");
+  control.hidden = !BOOK_VIEWS.has(view);
+  $$('[data-layout-choice]', control).forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.layoutChoice === state.bookLayout));
+  });
+}
+
 function initResultControls() {
-  const layout = $("#result-view");
-  $$('[data-result-layout]', layout).forEach((button) => {
-    button.setAttribute("aria-pressed", String(button.dataset.resultLayout === state.resultLayout));
-    button.addEventListener("click", () => {
-      closeBookMenu();
-      state.resultLayout = button.dataset.resultLayout;
-      localStorage.setItem("novellist-results-layout", state.resultLayout);
-      setSelectedLayout("result-view", "result-layout", state.resultLayout);
-      renderResults();
-    });
+  $("#book-layout").addEventListener("click", (event) => {
+    const view = document.body.dataset.view;
+    const layout = event.target.closest("[data-layout-choice]")?.dataset.layoutChoice;
+    if (!BOOK_VIEWS.has(view) || !layout || layout === state.bookLayout) return;
+    closeBookMenu();
+    const changedShelfMode = layout === "shelf" || state.bookLayout === "shelf";
+    state.bookLayout = layout;
+    localStorage.setItem("novellist-book-layout", layout);
+    syncLayoutControl(view);
+    if (changedShelfMode && !state.currentQuery) loadCatalogue(true);
+    else if (state.results.length) renderResults();
+    drawLibrary();
+    drawTierboard();
+    if (state.favorites.length) drawFavorites();
+    if (view === "tiers" && state.reviewSuggestions && !focusReviewBook(state.reviewBookId)) nextSuggestedBook();
   });
   const sort = $("#result-sort");
   sort.value = state.resultSort;
@@ -642,68 +1035,136 @@ function drawLibrary(keepBooks = false) {
   const target = $("#books");
   const filters = $("#filters");
   const toolbar = $("#library-toolbar");
-  const layout = state.libraryLayout;
+  const layout = state.bookLayout;
   const closed = layout === "shelf" && !state.cabinetOpen;
-  toolbar.hidden = !state.user || closed;
-  setSelectedLayout("library-view", "library-layout", layout);
-  if (!state.user) {
-    target.innerHTML = '<div class="empty">Sign in to start a personal library.</div>';
-    return;
-  }
+  toolbar.hidden = !state.user;
+  filters.inert = closed;
   const status = state.activeStatus;
-  if (!keepBooks || !filters.firstElementChild) {
+  if (state.user && filters.dataset.status !== status) {
+    filters.dataset.status = status;
     filters.innerHTML = timelineMarkup("Reading status", "filter", READING_STOPS, status, status === "all" ? "All statuses" : STATUS[status]) +
       `<button type="button" class="text-button library-all" aria-pressed="${status === "all"}">All</button>`;
     wireTimeline(filters, "filter", READING_STOPS, status, (next) => changeLibraryFilter(next, "#book-track-filter"));
     $(".library-all", filters).onclick = () => changeLibraryFilter("all", ".library-all");
   }
+  const query = state.scopedQueries.library;
+  const books = scopedMatches(state.items, query);
   const groups = READING_STOPS.map(([value, title]) => ({
-    title, books: status === "all" || status === value ? state.items.filter((item) => displayStatus(item.status) === value) : [],
-  })).filter((group) => group.books.length);
+    title, books: status === "all" || status === value ? books.filter((item) => displayStatus(item.status) === value) : [],
+  })).filter((group) => layout === "shelf" || group.books.length);
+  const hasBooks = groups.some((group) => group.books.length);
   const canReuse = keepBooks && target.dataset.layout === layout;
   target.dataset.layout = layout;
-  const empty = '<div class="empty">No saved novels in this reading state.</div>';
+  const empty = !state.user ? "Sign in to start a personal library." : query
+    ? "No saved novels match this search." : "No saved novels in this reading state.";
   const shelves = layout === "shelf" ? $(".cabinet-interior", target) : target;
-  if (canReuse && shelves) {
+  if (canReuse && shelves && layout === "shelf") {
+    syncBookGroups(shelves, groups, layout);
+    const inscription = $(".cabinet-inscription", shelves);
+    inscription.hidden = hasBooks;
+    inscription.textContent = empty;
+    balanceCabinetShelves();
+    queueSpineTitles();
+    return;
+  }
+  if (canReuse && layout !== "shelf") {
     if (groups.length) {
       $(":scope > .empty", shelves)?.remove();
       syncBookGroups(shelves, groups, layout);
     } else if (!$(":scope > .empty", shelves)) {
-      shelves.innerHTML = empty;
+      shelves.innerHTML = `<div class="empty">${empty}</div>`;
     }
     return;
   }
   if (layout === "shelf") {
-    const offsets = shelfOffsets(target);
     target.innerHTML = `<div class="library-cabinet" ${closed ? "" : "data-open"}>
-      <div class="cabinet-interior" ${closed ? "inert" : ""}>${groups.length ? groupMarkup(groups, layout) : empty}</div>
-      <div class="cabinet-doors" ${closed ? "" : "inert"}>
-        <button type="button" class="cabinet-door left" aria-label="Open left cabinet door"><span aria-hidden="true"></span></button>
-        <button type="button" class="cabinet-door right" aria-label="Open right cabinet door"><span aria-hidden="true"></span></button>
+      <div class="cabinet-interior" ${closed ? "inert" : ""}>${groupMarkup(groups, layout)}
+        <p class="cabinet-inscription" ${hasBooks ? "hidden" : ""}>${empty}</p></div>
+      <div class="cabinet-doors">
+        ${["left", "right"].map((side) => `<button type="button" class="cabinet-door ${side}" data-cabinet-side="${side}" aria-label="${closed ? "Open" : "Close"} ${side} cabinet door" aria-expanded="${!closed}"><span aria-hidden="true"></span></button>`).join("")}
       </div></div>`;
     bindBookGroups(target, groups);
-    restoreShelfOffsets(target, offsets);
-    $$(".cabinet-door", target).forEach((door) => door.addEventListener("click", (event) => {
-      state.cabinetOpen = true;
-      const cabinet = $(".library-cabinet", target);
-      cabinet.setAttribute("data-open", "");
-      $(".cabinet-interior", cabinet).inert = false;
-      $(".cabinet-doors", cabinet).inert = true;
-      toolbar.hidden = false;
-      if (event.detail === 0) $("#book-track-filter").focus({ preventScroll: true });
-    }));
+    balanceCabinetShelves();
+    queueSpineTitles();
   } else if (groups.length) {
     drawBookGroups(target, groups, layout);
   } else {
-    target.innerHTML = empty;
+    target.innerHTML = `<div class="empty">${empty}</div>`;
   }
 }
 
+function balanceCabinetShelves() {
+  const interior = $(".cabinet-interior", $("#books"));
+  if (!interior) return;
+  const rows = $$(".book-row", interior);
+  const width = rows[0]?.clientWidth;
+  if (!width) return;
+  const style = getComputedStyle(rows[0]);
+  const capacity = width - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+  const gap = parseFloat(style.columnGap) || 0;
+  const home = READING_STOPS.map(() => []);
+  for (const book of $$("[data-book-key]", interior)) {
+    const status = displayStatus(shelfBooks.get(book)?.status);
+    const index = READING_STOPS.findIndex(([value]) => value === status);
+    if (index >= 0) home[index].push({ book, width: $(".book-spine", book).offsetWidth });
+  }
+  const destinations = rows.map(() => []);
+  home.forEach((books, homeIndex) => {
+    if (!books.length) return;
+    let rowIndex = homeIndex;
+    let used = 0;
+    for (const { book, width: spineWidth } of books) {
+      if (used && used + gap + spineWidth > capacity && rowIndex + 1 < rows.length && !home[rowIndex + 1].length) {
+        rowIndex++;
+        used = 0;
+      }
+      destinations[rowIndex].push(book);
+      used += spineWidth + (used ? gap : 0);
+    }
+  });
+  rows.forEach((row, index) => {
+    const shelf = row.parentElement;
+    const label = $(".shelf-label", shelf);
+    const title = home[index].length ? READING_STOPS[index][1] : "";
+    if (label.textContent !== title) label.textContent = title;
+    const first = destinations[index][0];
+    const description = title || (first ? `${STATUS[shelfBooks.get(first).status]} continued` : "");
+    if (description && shelf.getAttribute("aria-label") !== description) shelf.setAttribute("aria-label", description);
+    else if (!description) shelf.removeAttribute("aria-label");
+    $(".shelf-empty", row)?.remove();
+    let next = row.firstElementChild;
+    for (const book of destinations[index]) {
+      if (book !== next) {
+        if (row.moveBefore) row.moveBefore(book, next);
+        else row.insertBefore(book, next);
+      }
+      next = book.nextElementSibling;
+    }
+  });
+}
+
+function setCabinetOpen(open) {
+  const cabinet = $(".library-cabinet");
+  if (!cabinet) return;
+  if (!open) closeBookMenu();
+  state.cabinetOpen = open;
+  cabinet.toggleAttribute("data-open", open);
+  $(".cabinet-interior", cabinet).inert = !open;
+  $("#filters").inert = !open;
+  $$(".cabinet-door", cabinet).forEach((door) => {
+    door.setAttribute("aria-label", `${open ? "Close" : "Open"} ${door.dataset.cabinetSide} cabinet door`);
+    door.setAttribute("aria-expanded", String(open));
+  });
+}
+
 function changeLibraryFilter(status, focusSelector) {
-  if (state.activeStatus === status) return;
+  if (state.activeStatus === status) {
+    if (status === "all") return;
+    status = "all";
+  }
   closeBookMenu();
   state.activeStatus = status;
-  drawLibrary();
+  drawLibrary(true);
   $(focusSelector, $("#filters"))?.focus({ preventScroll: true });
 }
 
@@ -722,8 +1183,7 @@ async function cacheCover(novelId, button) {
 }
 
 function drawTierboard(keepBooks = false) {
-  const layout = state.tierDisplay;
-  setSelectedLayout("tier-view", "display", layout);
+  const layout = state.bookLayout;
   const target = $("#tierboard");
   const suggestions = state.items.filter((item) => item.tier && item.tier_source === "suggested");
   const review = $("#review-suggestions");
@@ -735,9 +1195,10 @@ function drawTierboard(keepBooks = false) {
     return;
   }
   const tiers = state.trashUnlocked ? [...TIERS, TRASH_TIER] : TIERS;
+  const books = scopedMatches(state.items, state.scopedQueries.tiers);
   const groups = tiers.map((tier) => ({ tier, title: tier === TRASH_TIER ? "Trash" : `Tier ${tier}`, books:
-    state.items.filter((item) => item.tier === tier).sort((a, b) => (a.tier_position ?? 0) - (b.tier_position ?? 0)) }));
-  const options = { tiers: true, draggable: true };
+    books.filter((item) => item.tier === tier).sort((a, b) => (a.tier_position ?? 0) - (b.tier_position ?? 0)) }));
+  const options = { tiers: true, draggable: true, review: state.reviewSuggestions, scope: target.id };
   if (keepBooks && target.dataset.layout === layout) {
     $(":scope > .empty", target)?.remove();
     syncBookGroups(target, groups, layout, options);
@@ -752,9 +1213,19 @@ function drawTierboard(keepBooks = false) {
   }
   bindTierDrag(target, async (id, tier, order) => {
     try {
+      if (state.reviewSuggestions && state.savedBooks.get(id)?.tier_source === "suggested") setReviewBook(id);
+      if (state.scopedQueries.tiers) {
+        const complete = state.items.filter((book) => book.tier === tier && book.novel_id !== id)
+          .sort((a, b) => a.tier_position - b.tier_position).map((book) => book.novel_id);
+        const index = order.indexOf(id);
+        const next = complete.indexOf(order[index + 1]);
+        const previous = complete.indexOf(order[index - 1]);
+        complete.splice(next >= 0 ? next : previous >= 0 ? previous + 1 : complete.length, 0, id);
+        order = complete;
+      }
       await request(`/collection/${id}/move`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tier, ordered_novel_ids: order }) });
       await refreshLibrary({ keepBooks: true });
-      setNotice("Tier list updated.");
+      if (!advanceReview(id)) setNotice("Tier list updated.");
     } catch (error) { setNotice(error.message, true); }
   });
 }
@@ -826,27 +1297,18 @@ function bindTierDrag(root, onDrop) {
 }
 
 function initCollectionControls() {
-  $("#library-view").addEventListener("click", (event) => {
-    const layout = event.target.closest("[data-library-layout]")?.dataset.libraryLayout;
-    if (!layout || layout === state.libraryLayout) return;
-    closeBookMenu();
-    state.libraryLayout = layout;
-    localStorage.setItem("novellist-library-layout", layout);
-    drawLibrary();
-  });
-  $("#tier-view").addEventListener("click", (event) => {
-    const layout = event.target.closest("[data-display]")?.dataset.display;
-    if (!layout || layout === state.tierDisplay) return;
-    closeBookMenu();
-    state.tierDisplay = layout;
-    localStorage.setItem("novellist-tier-display", layout);
-    drawTierboard();
+  new ResizeObserver(balanceCabinetShelves).observe($("#books"));
+  $("#books").addEventListener("click", (event) => {
+    if (event.target.closest(".cabinet-door")) setCabinetOpen(!state.cabinetOpen);
   });
   $("#review-suggestions").addEventListener("click", () => {
     state.reviewSuggestions = !state.reviewSuggestions;
+    state.reviewBookId = null;
     closeBookMenu();
     drawTierboard();
-    if (state.reviewSuggestions) nextSuggestedBook();
+    if (state.reviewSuggestions && !nextSuggestedBook(suggestedBookIds()) && state.scopedQueries.tiers) {
+      setNotice("No suggestions match this search.");
+    }
   });
 }
 
@@ -905,7 +1367,6 @@ async function renderAccount() {
       ${data.favorite_tags?.length ? `<div class="taste-tags">${data.favorite_tags.map((tag) => `<span>${escapeHTML(tag)}</span>`).join("")}</div>` : ""}
       <div class="profile-actions">
         <button type="button" class="outline-button" data-profile-action="public">View public profile</button>
-        <button type="button" class="text-button" data-profile-action="logout">Sign out</button>
       </div></article>`;
   } catch (error) {
     if (state.user === reader) target.innerHTML = `<div class="empty">${escapeHTML(error.message)}</div>`;
@@ -913,14 +1374,98 @@ async function renderAccount() {
 }
 
 async function renderCommunity() {
-  const target = $("#shared-collections");
+  const token = state.token;
   try {
     const data = await request("/shared-collections");
-    target.innerHTML = data.collections.length ? data.collections.map((collection) => `<article class="collection-card"><h2>${escapeHTML(collection.name)}</h2><button class="text-button byline" data-reader="${escapeHTML(collection.username)}" type="button">by ${escapeHTML(collection.username)}</button>${collection.description ? `<p>${escapeHTML(collection.description)}</p>` : ""}<div class="collection-actions"><button class="small-button" data-open-collection="${collection.id}" type="button">Open tier list</button><button class="small-button" data-follow-collection="${collection.id}" data-following="${collection.following ? "true" : "false"}" type="button">${collection.following ? "Unfollow" : "Follow"} · ${collection.followers}</button></div></article>`).join("") : '<div class="empty">No public collections yet. Create the first one.</div>';
-    $$('[data-open-collection]', target).forEach((button) => button.addEventListener("click", () => openCollection(Number(button.dataset.openCollection))));
-    $$('[data-follow-collection]', target).forEach((button) => button.addEventListener("click", () => followCollection(Number(button.dataset.followCollection), button.dataset.following !== "true")));
-    $$('[data-reader]', target).forEach((button) => button.addEventListener("click", () => openReaderProfile(button.dataset.reader)));
-  } catch (error) { target.innerHTML = `<div class="empty">${escapeHTML(error.message)}</div>`; }
+    if (token !== state.token) return;
+    state.collections = data.collections;
+    state.discussions = (data.discussion || []).map((entry) => ({ ...entry, description: entry.body }));
+    drawCommunity();
+    if (document.body.dataset.view === "community" && document.activeElement === $("#query")) queueSuggestions();
+  } catch (error) {
+    if (token !== state.token) return;
+    const message = `<div class="empty">${escapeHTML(error.message)}</div>`;
+    $("#shared-collections").innerHTML = message;
+    $("#community-discussions").innerHTML = message;
+  }
+}
+
+function discussionTime(created_at) {
+  const date = new Date(created_at);
+  const elapsed = Math.max(0, Math.floor((Date.now() - date.getTime()) / 60000));
+  const time = elapsed < 1 ? "Just now" : elapsed < 60 ? `${elapsed}m ago` : elapsed < 1440
+    ? `${Math.floor(elapsed / 60)}h ago` : `${Math.floor(elapsed / 1440)}d ago`;
+  return `<time datetime="${escapeHTML(created_at)}">${time}</time>`;
+}
+
+function discussionMarkup({ collection_id, thread_id, name, body, username, created_at, comment_count }) {
+  const target = thread_id ? `data-open-thread="${thread_id}"` : `data-open-discussion="${collection_id}"`;
+  const noun = thread_id ? (comment_count === 1 ? "reply" : "replies") : (comment_count === 1 ? "comment" : "comments");
+  return `<article class="discussion-item">
+    <button type="button" class="collection-title" ${target}>${escapeHTML(name)}</button>
+    <p>${escapeHTML(body)}</p>
+    <div class="discussion-item-meta"><small>${escapeHTML(username)} · ${comment_count} ${noun} · ${discussionTime(created_at)}</small>
+      <button type="button" class="text-button" ${target} data-focus-reply aria-label="Reply to ${escapeHTML(name)}">Reply</button></div>
+  </article>`;
+}
+
+function drawCommunity() {
+  const target = $("#shared-collections");
+  const query = state.scopedQueries.community;
+  const collections = query ? communityMatches(query) : state.collections;
+  const discussions = scopedMatches(state.discussions, query);
+  $("#community-discussions").innerHTML = discussions.map(discussionMarkup).join("") ||
+    `<div class="empty">${query ? "No discussions match this search." : "No public discussion yet."}</div>`;
+  $("#discussion-highlights").innerHTML = discussions.slice(0, 4).map(discussionMarkup).join("") ||
+    '<p class="subtle">No recent comments.</p>';
+  if (!collections.length) {
+    target.innerHTML = `<div class="empty">${query ? "No collections match this search." : "No public collections yet."}</div>`;
+    return;
+  }
+  target.innerHTML = collections.map(({ id, name, username, description, following, followers, books }) => `<article class="collection-card">
+    ${books?.length ? `<button class="collection-preview" data-open-collection="${id}" type="button" aria-label="Open ${escapeHTML(name)}">
+      ${books.slice(0, 3).map((book) => `<span class="book-face shelf-book" data-binding="${book.novel_id % 8}">${coverMarkup(book, "book-jacket")}</span>`).join("")}</button>` : ""}
+    <div class="collection-summary">
+      <h2><button class="collection-title" data-open-collection="${id}" type="button">${escapeHTML(name)}</button></h2>
+      ${description ? `<p>${escapeHTML(description)}</p>` : ""}
+      <div class="collection-meta"><button class="text-button byline" data-reader="${escapeHTML(username)}" type="button">${glyph("CircleUserRound")} ${escapeHTML(username)}</button>
+        <button class="text-button collection-discuss" data-open-discussion="${id}" data-focus-reply type="button">Discuss</button>
+        <button class="outline-button" data-follow-collection="${id}" aria-pressed="${Boolean(following)}" type="button">${following ? "Following" : "Follow"}${followers ? ` · ${followers}` : ""}</button></div>
+    </div>
+  </article>`).join("");
+  bindCoverFallbacks(target);
+}
+
+function selectCommunityPanel(panel, focus = false) {
+  state.communityPanel = panel;
+  $("#shared-collections").hidden = panel !== "collections";
+  $("#community-discussions").hidden = panel !== "discussion";
+  $("#discussion-preview").hidden = panel === "discussion";
+  $("#community-request").hidden = panel === "discussion";
+  if (panel === "discussion") $("#community-request").open = false;
+  $$("#community-tabs [role=tab]").forEach((tab) => {
+    const selected = tab.dataset.communityPanel === panel;
+    tab.setAttribute("aria-selected", String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+    if (selected && focus) tab.focus();
+  });
+  syncScopedSearch("community");
+}
+
+async function renderFavorites() {
+  const target = $("#owner-favorites");
+  try {
+    state.favorites = (await request("/favorites")).items;
+    drawFavorites();
+  } catch (error) {
+    target.innerHTML = `<div class="empty">${escapeHTML(error.message)}</div>`;
+  }
+}
+
+function drawFavorites() {
+  const target = $("#owner-favorites");
+  if (state.favorites.length) drawBookGroups(target, [{ title: "S tier", books: state.favorites }], state.bookLayout);
+  else target.innerHTML = '<div class="empty">No S-tier favorites have been added yet.</div>';
 }
 
 async function createSharedCollection(event) {
@@ -929,6 +1474,7 @@ async function createSharedCollection(event) {
   try {
     await request("/shared-collections", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: $("#collection-name").value, description: $("#collection-description").value, visibility: "public" }) });
     event.target.reset();
+    event.target.closest("details").open = false;
     await renderCommunity();
     setNotice("Collection created.");
   } catch (error) { setNotice(error.message, true); }
@@ -943,24 +1489,138 @@ async function followCollection(collectionId, following) {
   } catch (error) { setNotice(error.message, true); }
 }
 
-async function openCollection(collectionId) {
+function openCommunityDetail() {
   closeBookMenu();
   openModal("collection-modal");
   const target = $("#collection-detail");
+  target.parentElement.scrollTop = 0;
   target.innerHTML = '<div class="skeleton wide"></div>';
+  return target;
+}
+
+function openDiscussionComposer() {
+  if (!state.user) return openLogin();
+  const target = openCommunityDetail();
+  target.innerHTML = `<div class="community-detail-header"><h2>Start a discussion</h2></div>
+    <form id="discussion-topic-form" class="discussion-composer discussion-topic-form">
+      <label>Title<input name="title" required maxlength="120" placeholder="What do you want to talk about?"></label>
+      <label>Message<textarea name="body" required maxlength="2000" rows="4"></textarea></label>
+      <div class="discussion-submit"><p class="form-message" role="status"></p><button class="primary-button" type="submit">Post discussion</button></div>
+    </form>`;
+  const form = $("#discussion-topic-form", target);
+  $("input", form).focus();
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const submit = $('button[type="submit"]', form);
+    if (submit.disabled) return;
+    submit.disabled = true;
+    try {
+      const data = Object.fromEntries(new FormData(form));
+      const { id } = await request("/discussions", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
+      });
+      if (form.isConnected && $("#collection-modal").classList.contains("open")) await openDiscussion(id);
+      state.scopedQueries.community = "";
+      selectCommunityPanel("discussion");
+      renderCommunity();
+    } catch (error) {
+      $(".form-message", form).textContent = error.message;
+      $(".form-message", form).dataset.state = "error";
+    } finally {
+      submit.disabled = false;
+    }
+  });
+}
+
+function communityMessage({ username, created_at, body }) {
+  return `<article class="community-message"><header><strong>${escapeHTML(username)}</strong>${discussionTime(created_at)}</header><p>${escapeHTML(body)}</p></article>`;
+}
+
+function communityConversation(messages, empty, label) {
+  return `<div class="community-messages" aria-live="polite">${messages.map(communityMessage).join("") || `<p class="subtle" data-empty-thread>${empty}</p>`}</div>
+    <form class="discussion-composer" id="collection-comment-form">
+      <textarea id="collection-comment" name="body" aria-label="${label}" maxlength="2000" required rows="3" placeholder="${label}"></textarea>
+      <div class="discussion-submit"><p class="form-message" role="status"></p><button class="primary-button" type="submit">Post reply</button></div>
+    </form>`;
+}
+
+function bindConversation(target, endpoint) {
+  const form = $(".discussion-composer", target);
+  const field = $("textarea", form);
+  const submit = $('button[type="submit"]', form);
+  const feedback = $(".form-message", form);
+  const messages = $(".community-messages", target);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!state.user) return openLogin();
+    if (submit.disabled) return;
+    const body = field.value;
+    submit.disabled = true;
+    try {
+      const message = await request(endpoint, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body }),
+      });
+      if (form.isConnected) {
+        $("[data-empty-thread]", messages)?.remove();
+        messages.insertAdjacentHTML("beforeend", communityMessage(message));
+        if (field.value === body) field.value = "";
+        feedback.dataset.state = "";
+        feedback.textContent = "Reply posted.";
+        const tab = $("[data-collection-panel=discussion]");
+        if (tab) tab.textContent = `Discussion · ${messages.childElementCount}`;
+      }
+      renderCommunity();
+    } catch (error) {
+      feedback.dataset.state = "error";
+      feedback.textContent = error.message;
+    } finally {
+      submit.disabled = false;
+    }
+  });
+}
+
+async function openDiscussion(threadId, focusReply = false) {
+  const target = openCommunityDetail();
+  const loading = target.firstElementChild;
+  try {
+    const thread = await request(`/discussions/${threadId}`);
+    if (!loading.isConnected || !$("#collection-modal").classList.contains("open")) return;
+    target.innerHTML = `<div class="community-detail-header"><h2 tabindex="-1">${escapeHTML(thread.title)}</h2></div>
+      <div class="thread-opening">${communityMessage(thread)}</div>
+      <div class="thread-conversation">${communityConversation(thread.replies, "No replies yet.", "Write a reply")}</div>`;
+    bindConversation(target, `/discussions/${threadId}/replies`);
+    $(focusReply ? "#collection-comment" : "h2", target).focus({ preventScroll: !focusReply });
+  } catch (error) {
+    if (loading.isConnected) target.innerHTML = `<div class="empty">${escapeHTML(error.message)}</div>`;
+  }
+}
+
+async function openCollection(collectionId, { novelId, keyboard = false, discussion = false, focusReply = false } = {}) {
+  const target = openCommunityDetail();
+  const loading = target.firstElementChild;
   try {
     const [collection, comments] = await Promise.all([request(`/shared-collections/${collectionId}`), request(`/shared-collections/${collectionId}/comments`)]);
+    if (!loading.isConnected || !$("#collection-modal").classList.contains("open")) return;
     const savedOptions = state.items.map((item) => `<option value="${item.novel_id}">${escapeHTML(item.title)}</option>`).join("");
     const owned = state.user?.id === collection.user_id;
     const groups = TIERS.map((tier) => ({ tier, title: `Tier ${tier}`, books:
       collection.items.filter((book) => (book.tier || "C") === tier).sort((a,b) => a.position - b.position) }));
-    target.innerHTML = `<h2>${escapeHTML(collection.name)}</h2><p class="subtle">by ${escapeHTML(collection.username)} · ${collection.followers} followers</p><p>${escapeHTML(collection.description)}</p>
-      <div class="book-collection shared-books" data-layout="list">${collection.items.length ? groupMarkup(owned ? groups : groups.filter((group) => group.books.length), "list", { tiers: true, draggable: owned }) : '<div class="empty">No novels have been added yet.</div>'}</div>
-      ${state.user?.id === collection.user_id ? `<div class="collection-actions" style="margin-top:12px"><select id="collection-item-select">${savedOptions || '<option value="">Save a novel first</option>'}</select><button id="add-collection-item" class="small-button" type="button">Add saved novel</button></div>` : ""}
-      <h3>Comments</h3><div class="comment-list">${comments.comments.length ? comments.comments.map((comment) => `<div class="comment"><strong>${escapeHTML(comment.username)}</strong> ${escapeHTML(comment.body)}</div>`).join("") : '<p class="subtle">No comments yet.</p>'}</div>
-      <form id="collection-comment-form" class="collection-actions" style="margin-top:10px"><input id="collection-comment" maxlength="2000" required placeholder="Add to the discussion"><button class="small-button" type="submit">Comment</button></form>`;
+    const layout = state.bookLayout;
+    target.innerHTML = `<header class="community-detail-header"><h2 tabindex="-1">${escapeHTML(collection.name)}</h2>
+      <p class="subtle">${escapeHTML(collection.username)} · ${collection.items.length} ${collection.items.length === 1 ? "novel" : "novels"}</p>
+      ${collection.description ? `<p>${escapeHTML(collection.description)}</p>` : ""}</header>
+      <div class="segmented collection-panels" role="group" aria-label="Collection view">
+        <button type="button" data-collection-panel="gallery" aria-controls="collection-gallery" aria-pressed="${!discussion}">Gallery</button>
+        <button type="button" data-collection-panel="discussion" aria-controls="collection-discussion" aria-pressed="${discussion}">Discussion · ${comments.comments.length}</button>
+      </div>
+      <div id="collection-gallery" ${discussion ? "hidden" : ""}>
+        <div class="book-collection shared-books">${collection.items.length ? "" : '<div class="empty">No novels have been added yet.</div>'}</div>
+        ${owned ? `<div class="collection-actions collection-add"><select id="collection-item-select" aria-label="Saved novel">${savedOptions || '<option value="">Save a novel first</option>'}</select><button id="add-collection-item" class="outline-button" type="button">Add saved novel</button></div>` : ""}
+      </div>
+      <div id="collection-discussion" ${discussion ? "" : "hidden"}>${communityConversation([...comments.comments].reverse(), "Start the conversation.", "Write a comment")}</div>`;
     if (collection.items.length) {
-      bindBookGroups(target, owned ? groups : groups.filter((group) => group.books.length));
+      drawBookGroups($(".shared-books", target), owned ? groups : groups.filter((group) => group.books.length), layout,
+        { tiers: true, draggable: owned, scope: `shared-${collectionId}` });
       if (owned) bindTierDrag(target, async (id, tier, order) => {
         try {
           await request(`/shared-collections/${collectionId}/items/${id}/move`, {
@@ -972,8 +1632,29 @@ async function openCollection(collectionId) {
       });
     }
     $("#add-collection-item")?.addEventListener("click", () => addCollectionItem(collectionId));
-    $("#collection-comment-form").addEventListener("submit", (event) => submitCollectionComment(event, collectionId));
-  } catch (error) { target.innerHTML = `<div class="empty">${escapeHTML(error.message)}</div>`; }
+    bindConversation(target, `/shared-collections/${collectionId}/comments`);
+    $(".collection-panels", target).addEventListener("click", (event) => {
+      const button = event.target.closest("[data-collection-panel]");
+      if (!button) return;
+      closeBookMenu();
+      const thread = button.dataset.collectionPanel === "discussion";
+      $("#collection-gallery", target).hidden = thread;
+      $("#collection-discussion", target).hidden = !thread;
+      $$("[data-collection-panel]", target).forEach((tab) => tab.setAttribute("aria-pressed", String(tab === button)));
+      if (!thread) queueSpineTitles();
+    });
+    $(focusReply ? "#collection-comment" : "h2", target).focus({ preventScroll: !focusReply });
+    if (!discussion && novelId) {
+      const novel = $(`[data-book-key="${novelId}"]`, target);
+      if (novel?.closest(".modal.open")) {
+        novel.scrollIntoView({ block: "nearest" });
+        if (novel.matches(BOOK_TRIGGER)) openBookMenu(novel, { pin: true, keyboard });
+        else $("input", novel)?.focus({ preventScroll: true });
+      }
+    }
+  } catch (error) {
+    if (loading.isConnected) target.innerHTML = `<div class="empty">${escapeHTML(error.message)}</div>`;
+  }
 }
 
 async function addCollectionItem(collectionId) {
@@ -986,25 +1667,17 @@ async function addCollectionItem(collectionId) {
   } catch (error) { setNotice(error.message, true); }
 }
 
-async function submitCollectionComment(event, collectionId) {
-  event.preventDefault();
-  if (!state.user) return openLogin();
-  try {
-    await request(`/shared-collections/${collectionId}/comments`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body: $("#collection-comment").value }) });
-    await openCollection(collectionId);
-    setNotice("Comment posted.");
-  } catch (error) { setNotice(error.message, true); }
-}
-
 async function openReaderProfile(username) {
-  openModal("collection-modal");
-  const target = $("#collection-detail");
-  target.innerHTML = '<div class="skeleton wide"></div>';
+  const target = openCommunityDetail();
+  const loading = target.firstElementChild;
   try {
     const data = await request(`/profiles/${encodeURIComponent(username)}`);
+    if (!loading.isConnected || !$("#collection-modal").classList.contains("open")) return;
     target.innerHTML = `<p class="eyebrow">Reader profile</p><h2>${escapeHTML(data.username)}</h2><p class="subtle">${data.library_count} saved novels</p><div class="taste-tags">${data.favorite_tags.map((tag) => `<span>${escapeHTML(tag)}</span>`).join("")}</div><h3>S-tier favourites</h3><div class="collection-detail-grid">${data.favorites.length ? data.favorites.map((book) => `<article class="collection-detail-book">${coverMarkup(book)}<strong>${escapeHTML(book.title)}</strong></article>`).join("") : '<div class="empty">No confirmed public favourites yet.</div>'}</div>`;
     bindCoverFallbacks(target);
-  } catch (error) { target.innerHTML = `<div class="empty">${escapeHTML(error.message)}</div>`; }
+  } catch (error) {
+    if (loading.isConnected) target.innerHTML = `<div class="empty">${escapeHTML(error.message)}</div>`;
+  }
 }
 
 async function submitNovelRequest() {
@@ -1211,19 +1884,25 @@ function clearSession() {
   state.token = "";
   setLibrary();
   state.cabinetOpen = false;
+  state.scopedQueries = {};
+  state.collections = [];
+  state.discussions = [];
   state.activeStatus = "all";
   state.reviewSuggestions = false;
+  state.reviewBookId = null;
   state.catalogueTags = [];
   state.selectedTags.clear();
   updateSelectedTags();
   invalidateCatalogue();
   localStorage.removeItem("novellist-token");
   syncReaderMenu();
+  syncScopedSearch(document.body.dataset.view);
   applyBookZoom();
   drawLibrary();
   drawTierboard();
   renderAnalytics();
   renderAccount();
+  renderCommunity();
   loadTags();
   if (state.currentQuery) runSearch(true); else loadCatalogue(true);
 }
@@ -1267,7 +1946,6 @@ function syncReaderMenu() {
   menu.hidden = !state.user;
   if (menu.hidden) menu.open = false;
   $("#auth").hidden = Boolean(state.user);
-  $("#theme").hidden = Boolean(state.user);
   $("#reader-menu-user").textContent = state.user?.username || "";
   $("#admin").hidden = state.user?.role !== "admin";
   $("#admin-nav").hidden = state.user?.role !== "admin";
@@ -1279,7 +1957,7 @@ function updateAccountUI() {
   applyBookZoom();
   renderAccount();
   renderAnalytics();
-  renderCommunity();
+  if (document.body.dataset.view === "community") renderCommunity();
   if (state.user?.role === "admin") refreshJobs();
 }
 
@@ -1349,8 +2027,8 @@ function bindStaticEvents() {
   $("#account-summary").addEventListener("click", (event) => {
     const action = event.target.closest("[data-profile-action]")?.dataset.profileAction;
     if (action === "public" && state.user) openReaderProfile(state.user.username);
-    if (action === "logout") signOut();
   });
+  $("#reader-signout").addEventListener("click", signOut);
   document.addEventListener("pointerdown", (event) => {
     const readerMenu = $("#reader-menu");
     if (readerMenu.open && !readerMenu.contains(event.target)) readerMenu.open = false;
@@ -1362,14 +2040,35 @@ function bindStaticEvents() {
   });
   $("#rotate-recovery").addEventListener("click", rotateRecoveryCode);
   $("#collection-form").addEventListener("submit", createSharedCollection);
+  $("#start-discussion").addEventListener("click", openDiscussionComposer);
+  $("#community-tabs").addEventListener("click", (event) => {
+    const tab = event.target.closest("[data-community-panel]");
+    if (tab) selectCommunityPanel(tab.dataset.communityPanel);
+  });
+  $("#community-tabs").addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const panel = event.key === "Home" ? "collections" : event.key === "End" ? "discussion"
+      : state.communityPanel === "collections" ? "discussion" : "collections";
+    selectCommunityPanel(panel, true);
+  });
+  $("#community").addEventListener("click", (event) => {
+    const action = event.target.closest("[data-open-collection], [data-open-discussion], [data-open-thread], [data-follow-collection], [data-reader]");
+    if (!action) return;
+    const focusReply = action.hasAttribute("data-focus-reply");
+    if (action.dataset.openCollection) openCollection(Number(action.dataset.openCollection));
+    if (action.dataset.openDiscussion) openCollection(Number(action.dataset.openDiscussion), { discussion: true, focusReply });
+    if (action.dataset.openThread) openDiscussion(Number(action.dataset.openThread), focusReply);
+    if (action.dataset.followCollection) followCollection(Number(action.dataset.followCollection), action.getAttribute("aria-pressed") !== "true");
+    if (action.dataset.reader) openReaderProfile(action.dataset.reader);
+  });
   $("#request-novel").addEventListener("click", submitNovelRequest);
   $("#scrape-form").addEventListener("submit", startScrape);
   $("#custom-scrape-form").addEventListener("submit", startCustomScrape);
   $("#catalogue-editor").addEventListener("submit", saveCatalogueRecord);
   $("#editor-reset").addEventListener("click", resetBookEditor);
   $("#direct-form").addEventListener("submit", startDirectDiscovery);
-  $("#search").addEventListener("click", () => runSearch(true));
-  $("#query").addEventListener("keydown", (event) => { if (event.key === "Enter") runSearch(true); });
+  bindScopedSearch();
   $("#open-filters").addEventListener("click", () => {
     const panel = $("#tag-dialog");
     if (panel.open) return closeFilters(true);
@@ -1379,7 +2078,6 @@ function bindStaticEvents() {
     renderTagCloud();
     $("#tag-query").focus({ preventScroll: true });
   });
-  $("#close-filters").addEventListener("click", () => closeFilters(true));
   document.addEventListener("pointerdown", (event) => {
     if ($("#tag-dialog").open && !event.target.closest("#tag-dialog,#open-filters")) closeFilters();
   });
@@ -1389,7 +2087,14 @@ function bindStaticEvents() {
   window.addEventListener("resize", positionFilters);
   window.addEventListener("scroll", positionFilters, { passive: true });
   $("#tag-query").addEventListener("input", renderTagCloud);
-  $("#clear-tags").addEventListener("click", () => { state.selectedTags.clear(); updateSelectedTags(); state.currentQuery ? runSearch(true) : loadCatalogue(true); });
+  $("#clear-tags").addEventListener("click", () => {
+    const hadTags = state.selectedTags.size > 0;
+    state.selectedTags.clear();
+    $("#tag-query").value = "";
+    renderTagCloud();
+    if (hadTags) state.currentQuery ? runSearch(true) : loadCatalogue(true);
+    $("#tag-query").focus({ preventScroll: true });
+  });
   $("#load-more").addEventListener("click", loadNextPage);
   new IntersectionObserver((entries) => {
     if (entries[0].isIntersecting && currentView() === "discover") loadNextPage();

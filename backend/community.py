@@ -28,6 +28,16 @@ def initialise_community() -> None:
         CREATE TABLE IF NOT EXISTS collection_follows (collection_id INTEGER NOT NULL,user_id INTEGER NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(collection_id,user_id));
         CREATE TABLE IF NOT EXISTS novel_reviews (id INTEGER PRIMARY KEY AUTOINCREMENT,novel_id INTEGER NOT NULL,user_id INTEGER NOT NULL,rating INTEGER,body TEXT NOT NULL,created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS collection_comments (id INTEGER PRIMARY KEY AUTOINCREMENT,collection_id INTEGER NOT NULL,user_id INTEGER NOT NULL,body TEXT NOT NULL,created_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS collection_comments_by_collection ON collection_comments(collection_id, id);
+        CREATE TABLE IF NOT EXISTS discussion_threads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, title TEXT NOT NULL,
+            body TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS discussion_replies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+            body TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS discussion_replies_by_thread ON discussion_replies(thread_id, id);
         CREATE TABLE IF NOT EXISTS novel_requests (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,query TEXT NOT NULL,note TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'open',created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS scrape_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,source TEXT NOT NULL,limit_count INTEGER NOT NULL,status TEXT NOT NULL,detail TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
         """)
@@ -101,6 +111,18 @@ def featured_favorites(limit: int = 12) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def owner_favorites() -> list[dict[str, Any]]:
+    with connection() as conn:
+        rows = conn.execute("""
+            SELECT li.novel_id, li.title, li.author, li.cover_url
+            FROM library_items li JOIN users u ON u.id=li.user_id
+            WHERE u.id=1 AND u.role='admin' AND li.tier='S'
+              AND COALESCE(li.tier_source, '') != 'suggested'
+            ORDER BY li.tier_position, li.title
+        """).fetchall()
+    return [dict(row) for row in rows]
+
+
 def public_reader_profile(username: str) -> dict[str, Any]:
     """Expose aggregate reading taste without leaking private session data."""
     with connection() as conn:
@@ -112,10 +134,6 @@ def public_reader_profile(username: str) -> dict[str, Any]:
             raise KeyError(username)
         status_rows = conn.execute(
             "SELECT status,COUNT(*) count FROM library_items WHERE user_id=? GROUP BY status",
-            (user["id"],),
-        ).fetchall()
-        tier_rows = conn.execute(
-            "SELECT tier,COUNT(*) count FROM library_items WHERE user_id=? AND tier IS NOT NULL GROUP BY tier",
             (user["id"],),
         ).fetchall()
         favorites = conn.execute(
@@ -133,7 +151,7 @@ def public_reader_profile(username: str) -> dict[str, Any]:
         "library_count": summary["library_count"],
         "favorite_tags": summary["favorite_tags"],
         "status_counts": {row["status"]: row["count"] for row in status_rows},
-        "tier_counts": {row["tier"]: row["count"] for row in tier_rows},
+        "tier_counts": summary["tier_counts"],
         "favorites": [dict(row) for row in favorites],
     }
 
@@ -189,7 +207,7 @@ def get_collection(collection_id: int, viewer_id: int | None = None, conn=None) 
             context.__exit__(None, None, None)
 
 
-def list_collections(viewer_id: int | None = None) -> list[dict]:
+def list_collections(viewer_id: int | None = None, visible_novel_ids: set[int] | None = None) -> list[dict]:
     with connection() as conn:
         viewer = viewer_id or -1
         rows = conn.execute(
@@ -199,7 +217,22 @@ def list_collections(viewer_id: int | None = None) -> list[dict]:
             WHERE c.visibility='public' OR c.user_id=? GROUP BY c.id ORDER BY c.created_at DESC""",
             (viewer, viewer),
         ).fetchall()
-    return [dict(row) for row in rows]
+        collections = {row["id"]: {**dict(row), "books": []} for row in rows}
+        if visible_novel_ids:
+            books = conn.execute("""
+                SELECT i.collection_id, i.novel_id, i.title, i.author, i.cover_url
+                FROM shared_collection_items i JOIN shared_collections c ON i.collection_id=c.id
+                WHERE c.visibility='public' OR c.user_id=?
+                ORDER BY i.tier, i.position
+            """, (viewer,))
+            for book in books:
+                if book["novel_id"] in visible_novel_ids:
+                    collection = collections[book["collection_id"]]
+                    summary = {key: book[key] for key in ("novel_id", "title", "author")}
+                    if len(collection["books"]) < 3:
+                        summary["cover_url"] = book["cover_url"]
+                    collection["books"].append(summary)
+    return list(collections.values())
 
 
 def add_to_collection(user_id: int, collection_id: int, novel_id: int) -> None:
@@ -340,15 +373,92 @@ def add_collection_comment(user_id: int, collection_id: int, body: str) -> dict:
         )
 
 
-def collection_comments(collection_id: int) -> list[dict]:
+def recent_discussions(limit: int = 20) -> list[dict]:
     with connection() as conn:
+        rows = conn.execute("""
+            WITH collection_activity AS (
+                SELECT comment.collection_id, MAX(comment.id) latest_id, COUNT(*) comment_count
+                FROM collection_comments comment JOIN shared_collections shelf ON shelf.id=comment.collection_id
+                WHERE shelf.visibility='public'
+                GROUP BY comment.collection_id
+            ), thread_activity AS (
+                SELECT thread_id, MAX(id) latest_id, COUNT(*) reply_count
+                FROM discussion_replies GROUP BY thread_id
+            ), entries AS (
+                SELECT activity.collection_id, NULL AS thread_id, shelf.name, comment.body, comment.created_at,
+                       activity.comment_count, users.username
+                FROM collection_activity activity JOIN shared_collections shelf ON shelf.id=activity.collection_id
+                JOIN collection_comments comment ON comment.id=activity.latest_id
+                JOIN users ON users.id=comment.user_id
+                UNION ALL
+                SELECT NULL, thread.id, thread.title, COALESCE(reply.body, thread.body),
+                       COALESCE(reply.created_at, thread.created_at), COALESCE(activity.reply_count, 0), users.username
+                FROM discussion_threads thread LEFT JOIN thread_activity activity ON activity.thread_id=thread.id
+                LEFT JOIN discussion_replies reply ON reply.id=activity.latest_id
+                JOIN users ON users.id=COALESCE(reply.user_id, thread.user_id)
+            )
+            SELECT * FROM entries ORDER BY created_at DESC, thread_id DESC, collection_id DESC LIMIT ?
+        """, (limit,)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def collection_comments(collection_id: int, viewer_id: int | None = None) -> list[dict]:
+    with connection() as conn:
+        collection = conn.execute(
+            "SELECT visibility,user_id FROM shared_collections WHERE id=?", (collection_id,)
+        ).fetchone()
+        if not collection:
+            raise KeyError(collection_id)
+        if collection["visibility"] == "private" and collection["user_id"] != viewer_id:
+            raise PermissionError
         return [
             dict(row)
             for row in conn.execute(
-                "SELECT c.*,u.username FROM collection_comments c JOIN users u ON u.id=c.user_id WHERE collection_id=? ORDER BY created_at DESC",
+                "SELECT c.*,u.username FROM collection_comments c JOIN users u ON u.id=c.user_id WHERE collection_id=? ORDER BY c.id DESC",
                 (collection_id,),
             ).fetchall()
         ]
+
+
+def create_discussion(user_id: int, title: str, body: str) -> int:
+    if not title.strip() or not body.strip():
+        raise ValueError("Enter a title and a message")
+    with connection() as conn:
+        cursor = conn.execute(
+            "INSERT INTO discussion_threads (user_id,title,body,created_at) VALUES (?,?,?,?)",
+            (user_id, title.strip(), body.strip(), now()),
+        )
+        return cursor.lastrowid
+
+
+def get_discussion(thread_id: int) -> dict:
+    with connection() as conn:
+        thread = conn.execute("""
+            SELECT thread.id,thread.title,thread.body,thread.created_at,users.username
+            FROM discussion_threads thread JOIN users ON users.id=thread.user_id WHERE thread.id=?
+        """, (thread_id,)).fetchone()
+        if not thread:
+            raise KeyError(thread_id)
+        replies = conn.execute("""
+            SELECT reply.id,reply.body,reply.created_at,users.username
+            FROM discussion_replies reply JOIN users ON users.id=reply.user_id
+            WHERE reply.thread_id=? ORDER BY reply.id
+        """, (thread_id,)).fetchall()
+    return {**dict(thread), "replies": [dict(reply) for reply in replies]}
+
+
+def reply_to_discussion(user_id: int, thread_id: int, body: str) -> dict:
+    if not body.strip():
+        raise ValueError("Enter a reply")
+    with connection() as conn:
+        if not conn.execute("SELECT 1 FROM discussion_threads WHERE id=?", (thread_id,)).fetchone():
+            raise KeyError(thread_id)
+        created_at = now()
+        cursor = conn.execute(
+            "INSERT INTO discussion_replies (thread_id,user_id,body,created_at) VALUES (?,?,?,?)",
+            (thread_id, user_id, body.strip(), created_at),
+        )
+        return {"id": cursor.lastrowid, "body": body.strip(), "created_at": created_at}
 
 
 def add_review(user_id: int, novel_id: int, rating: float | None, body: str) -> dict:

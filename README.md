@@ -1,6 +1,6 @@
 # novelist
 
-Search a novel catalogue, track your reading, and rank books on a personal tier list. novelist also supports CSV reading-list imports, community collections, and reviews. Guests can explore a fictional preview. Sign in to browse the installation's catalogue.
+Search a novel catalogue, track your reading, and rank books on a personal tier list. novelist also supports CSV reading-list imports, community collections, and reviews. Guests can explore sample novels and [Project Gutenberg](https://www.gutenberg.org/) classics. Sign in to browse the installation's catalogue.
 
 ## Run locally
 

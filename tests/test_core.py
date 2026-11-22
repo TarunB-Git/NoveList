@@ -265,6 +265,12 @@ class CoreTests(unittest.TestCase):
             )
             self.assertEqual(saved.status_code, 200)
             self.assertEqual(saved.json()["tier"], "S")
+            owner_book = {**novel, "id": 8, "title": "Owner favorite"}
+            collection.save_item(1, owner_book, "reading", tier="S")
+            collection.save_item(1, {**novel, "id": 9}, "reading", tier="A")
+            for viewer in ({}, headers):
+                favorites = client.get("/favorites", headers=viewer).json()["items"]
+                self.assertEqual([book["novel_id"] for book in favorites], [8])
             library = client.get("/collection", headers=headers)
             self.assertEqual(library.json()["items"][0]["title"], "Dragon Road")
             self.assertFalse(library.json()["trash_unlocked"])
@@ -290,6 +296,34 @@ class CoreTests(unittest.TestCase):
             shared_path = f"/shared-collections/{shared['id']}"
             self.assertEqual(client.post(f"{shared_path}/items", json={"novel_id": 7}, headers=headers).status_code, 200)
             self.assertEqual(client.get(shared_path, headers=headers).json()["items"][0]["tier"], "C")
+            public = client.get("/shared-collections").json()["collections"]
+            self.assertEqual([book["novel_id"] for book in public[0]["books"]], [7])
+            for body in ("First public comment", "Latest public comment"):
+                reply = client.post(f"{shared_path}/comments", json={"body": body}, headers=headers)
+                self.assertEqual(reply.status_code, 200)
+            private = client.post(
+                "/shared-collections", json={"name": "Private reading group", "visibility": "private"}, headers=headers
+            ).json()
+            private_comments = f"/shared-collections/{private['id']}/comments"
+            self.assertEqual(client.post(private_comments, json={"body": "Private comment"}, headers=headers).status_code, 200)
+            self.assertEqual(client.get(private_comments).status_code, 403)
+            self.assertEqual(len(client.get(private_comments, headers=headers).json()["comments"]), 1)
+            for viewer in ({}, headers):
+                discussion = client.get("/shared-collections", headers=viewer).json()["discussion"]
+                self.assertEqual([(entry["body"], entry["comment_count"]) for entry in discussion], [("Latest public comment", 2)])
+            topic = {"title": "First discussion", "body": "Where should I start?"}
+            self.assertEqual(client.post("/discussions", json=topic).status_code, 401)
+            created = client.post("/discussions", json=topic, headers=headers)
+            self.assertEqual(created.status_code, 201)
+            thread = f"/discussions/{created.json()['id']}"
+            self.assertEqual(client.get(thread).json()["replies"], [])
+            self.assertEqual(client.post(f"{thread}/replies", json={"body": "   "}, headers=headers).status_code, 422)
+            reply = client.post(f"{thread}/replies", json={"body": "Start at the beginning."}, headers=headers)
+            self.assertEqual(reply.status_code, 201)
+            self.assertEqual(client.get(thread).json()["replies"][0]["body"], "Start at the beginning.")
+            activity = client.get("/shared-collections").json()["discussion"]
+            matching = next(entry for entry in activity if entry["thread_id"] == created.json()["id"])
+            self.assertEqual((matching["name"], matching["comment_count"]), (topic["title"], 1))
             self.assertEqual(client.put(f"{shared_path}/items/7/move", json={"tier": "trash", "ordered_novel_ids": [7]}, headers=headers).status_code, 422)
             self.assertEqual(client.delete("/collection/7").status_code, 401)
             self.assertEqual(client.delete("/collection/7", headers=headers).status_code, 204)
@@ -335,6 +369,9 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(preview["items"][0]["id"], 30)
             self.assertEqual(client.get("/novels?limit=60").json()["total"], 24)
             self.assertEqual(client.get("/catalogue/tags").json()["tags"][0]["count"], 24)
+            shelf_preview = client.get("/catalogue/shelves").json()["shelves"][0]
+            self.assertFalse(shelf_preview["has_more"])
+            self.assertEqual(len(shelf_preview["books"]), 24)
             searched = client.post("/search", json={"query": "story", "top_k": 30}).json()
             self.assertEqual(len(searched["results"]), 24)
             self.assertEqual(searched["total_indexed"], 24)
@@ -348,6 +385,14 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(full["total"], 30)
             self.assertFalse(full["limited"])
             self.assertEqual(client.get("/catalogue/tags", headers=headers).json()["tags"][0]["count"], 30)
+            shelf_page = client.get("/catalogue/shelves?tags=fantasy", headers=headers).json()
+            self.assertFalse(shelf_page["has_more"])
+            first_shelf = shelf_page["shelves"][0]
+            self.assertTrue(first_shelf["has_more"])
+            last = client.get("/catalogue/shelves?shelf=fantasy&page=2&tags=fantasy", headers=headers).json()
+            self.assertEqual([book["id"] for book in last["items"]], [6, 5, 4, 3, 2, 1])
+            self.assertFalse(last["has_more"])
+            self.assertEqual(client.get("/catalogue/shelves?page=2", headers=headers).json()["shelves"], [])
             searched = client.post("/search", json={"query": "story", "top_k": 30}, headers=headers).json()
             self.assertEqual(len(searched["results"]), 24)  # default page size
             self.assertEqual(searched["total_indexed"], 30)
