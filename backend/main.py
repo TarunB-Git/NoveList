@@ -369,6 +369,10 @@ class AddSharedItemRequest(BaseModel):
     novel_id: int
 
 
+class AddSharedItemsRequest(BaseModel):
+    novel_ids: list[int] = Field(min_length=1)
+
+
 class SharedTierMoveRequest(BaseModel):
     tier: Literal["S", "A", "B", "C", "D"]
     ordered_novel_ids: List[int]
@@ -844,6 +848,20 @@ def get_storage(user: dict = Depends(user_from_request)):
     return storage_usage()
 
 
+@app.get("/requests", tags=["community"], dependencies=[Depends(user_from_request)])
+def get_novel_requests(
+    before: int | None = Query(default=None, ge=1, le=2**63 - 1),
+    q: str = Query(default="", max_length=300),
+):
+    page_size = 30
+    rows = list_novel_requests(page_size + 1, before_id=before, query=q.strip())
+    fields = ("query", "username", "status", "created_at")
+    return {
+        "requests": [{field: row[field] for field in fields} for row in rows[:page_size]],
+        "next_before": rows[page_size - 1]["id"] if len(rows) > page_size else None,
+    }
+
+
 @app.post("/requests", tags=["community"])
 def create_novel_request(
     req: NovelRequestBody, user: dict = Depends(user_from_request)
@@ -928,30 +946,31 @@ def post_shared_collection(
 
 @app.get("/shared-collections/{collection_id}", tags=["community"])
 def get_one_shared_collection(collection_id: int, request: Request):
-    try:
-        user = user_from_request(request)
-    except HTTPException:
-        user = None
+    user = _optional_user(request)
     try:
         data = get_shared_collection(collection_id, user["id"] if user else None)
     except KeyError as exc:
         raise HTTPException(404, "Collection not found") from exc
     except PermissionError as exc:
         raise HTTPException(403, "This collection is private") from exc
-    allowed = {novel["id"] for novel in _visible_catalogue(request)}
-    data["items"] = [item for item in data["items"] if item["novel_id"] in allowed]
+    if not user or user["id"] != data["user_id"]:
+        allowed = {novel["id"] for novel in _visible_catalogue(request)}
+        data["items"] = [item for item in data["items"] if item["novel_id"] in allowed]
+    for item in data["items"]:
+        item["cover_url"] = _catalogue_url(item.get("cover_url"))
     return data
 
 
 @app.post("/shared-collections/{collection_id}/items", tags=["community"])
 def post_shared_item(
     collection_id: int,
-    req: AddSharedItemRequest,
+    req: AddSharedItemRequest | AddSharedItemsRequest,
     user: dict = Depends(user_from_request),
 ):
     try:
-        add_to_collection(user["id"], collection_id, req.novel_id)
-        return {"status": "added"}
+        ids = req.novel_ids if isinstance(req, AddSharedItemsRequest) else [req.novel_id]
+        added = add_to_collection(user["id"], collection_id, ids)
+        return {"status": "added", "added": added}
     except KeyError as exc:
         raise HTTPException(404, "Collection or saved title not found") from exc
     except PermissionError as exc:

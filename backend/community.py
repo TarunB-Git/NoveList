@@ -235,8 +235,9 @@ def list_collections(viewer_id: int | None = None, visible_novel_ids: set[int] |
     return list(collections.values())
 
 
-def add_to_collection(user_id: int, collection_id: int, novel_id: int) -> None:
+def add_to_collection(user_id: int, collection_id: int, novel_ids: list[int]) -> int:
     with connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         owner = conn.execute(
             "SELECT user_id FROM shared_collections WHERE id=?", (collection_id,)
         ).fetchone()
@@ -244,28 +245,29 @@ def add_to_collection(user_id: int, collection_id: int, novel_id: int) -> None:
             raise KeyError(collection_id)
         if owner["user_id"] != user_id:
             raise PermissionError
-        book = conn.execute(
-            "SELECT title,author,cover_url,tier FROM library_items WHERE user_id=? AND novel_id=?",
-            (user_id, novel_id),
-        ).fetchone()
-        if not book:
-            raise KeyError(novel_id)
+        ids = list(dict.fromkeys(novel_ids))
+        wanted = set(ids)
+        books = {
+            book["novel_id"]: book
+            for book in conn.execute(
+                "SELECT novel_id,title,author,cover_url,tier FROM library_items WHERE user_id=?",
+                (user_id,),
+            )
+            if book["novel_id"] in wanted
+        }
+        if wanted != books.keys():
+            raise KeyError("Saved novel not found")
         position = conn.execute(
             "SELECT COALESCE(MAX(position),-1)+1 FROM shared_collection_items WHERE collection_id=?",
             (collection_id,),
         ).fetchone()[0]
-        conn.execute(
-            "INSERT OR REPLACE INTO shared_collection_items (collection_id,novel_id,title,author,cover_url,tier,position) VALUES (?,?,?,?,?,?,?)",
-            (
-                collection_id,
-                novel_id,
-                book["title"],
-                book["author"],
-                book["cover_url"],
-                book["tier"] if book["tier"] in VALID_TIERS else "C",
-                position,
-            ),
-        )
+        added = conn.executemany(
+            "INSERT OR IGNORE INTO shared_collection_items (collection_id,novel_id,title,author,cover_url,tier,position) VALUES (?,?,?,?,?,?,?)",
+            ((collection_id, book["novel_id"], book["title"], book["author"], book["cover_url"],
+              book["tier"] if book["tier"] in VALID_TIERS else "C", index)
+             for index, book in enumerate((books[novel_id] for novel_id in ids), position)),
+        ).rowcount
+    return added
 
 
 def move_collection_item(
@@ -500,12 +502,21 @@ def request_novel(user_id: int, query: str, note: str) -> None:
         )
 
 
-def list_novel_requests(limit: int = 100) -> list[dict]:
+def list_novel_requests(limit: int = 100, *, before_id: int | None = None, query: str = "") -> list[dict]:
+    conditions = []
+    values = []
+    if before_id is not None:
+        conditions.append("r.id < ?")
+        values.append(before_id)
+    if query:
+        conditions.append("(INSTR(LOWER(r.query), LOWER(?)) > 0 OR INSTR(LOWER(u.username), LOWER(?)) > 0)")
+        values.extend((query, query))
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
     with connection() as conn:
         rows = conn.execute(
-            """SELECT r.*,u.username FROM novel_requests r JOIN users u ON u.id=r.user_id
-                             ORDER BY r.created_at DESC LIMIT ?""",
-            (limit,),
+            f"""SELECT r.*,u.username FROM novel_requests r JOIN users u ON u.id=r.user_id
+                {where} ORDER BY r.id DESC LIMIT ?""",
+            (*values, limit),
         ).fetchall()
     return [dict(row) for row in rows]
 

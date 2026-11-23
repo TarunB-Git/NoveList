@@ -288,11 +288,11 @@ function compactTierCaption(item) {
 }
 
 function groupMarkup(groups, layout, options = {}) {
-  const { tiers = false } = options;
+  const { tiers = false, horizontal = false } = options;
   return groups.map(({ title, books, tier }) => `<section class="book-section${tiers ? " ranked-shelf" : ""}"
       ${tier ? `data-tier="${tier}"` : ""} data-book-group="${escapeHTML(title)}" aria-label="${escapeHTML(title)}">
     <h2 class="shelf-label"${tier === TRASH_TIER ? ' aria-label="Trash"' : ""}>${tier === TRASH_TIER ? glyph("Trash2") : escapeHTML(tier && layout === "shelf" ? tier : title)}</h2>
-    <div class="book-row" ${tier ? `data-drop-tier="${tier}"` : ""}>
+    <div class="book-row" ${tier ? `data-drop-tier="${tier}"` : ""}${horizontal ? ` tabindex="0" aria-label="${escapeHTML(title)}"` : ""}>
       ${books.length ? books.map((book) => bookMarkup(book, layout, options)).join("") : '<p class="shelf-empty">Empty shelf</p>'}
     </div></section>`).join("");
 }

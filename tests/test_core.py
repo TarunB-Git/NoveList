@@ -259,6 +259,24 @@ class CoreTests(unittest.TestCase):
             )
             self.assertEqual(account.status_code, 200)
             headers = {"Authorization": f"Bearer {account.json()['token']}"}
+            community.request_novel(1, "First requested novel", "Private catalogue note")
+            for number in range(29):
+                community.request_novel(1, f"Previous request {number}", "")
+            novel_request = client.post("/requests", json={"query": "Dragon sequel"}, headers=headers)
+            self.assertEqual(novel_request.status_code, 200)
+            self.assertEqual(client.get("/requests").status_code, 401)
+            history = client.get("/requests", headers=headers).json()
+            self.assertEqual(len(history["requests"]), 30)
+            self.assertEqual(
+                [(row["query"], row["username"]) for row in history["requests"][:1]],
+                [("Dragon sequel", "reader_api")],
+            )
+            earlier = client.get("/requests", params={"before": history["next_before"]}, headers=headers).json()
+            self.assertEqual([row["query"] for row in earlier["requests"]], ["First requested novel"])
+            self.assertEqual(set(earlier["requests"][0]), {"query", "username", "status", "created_at"})
+            self.assertIsNone(earlier["next_before"])
+            found = client.get("/requests", params={"q": "reader_api"}, headers=headers).json()
+            self.assertEqual(found["requests"], history["requests"][:1])
             saved = client.put(
                 "/collection/7", json={"status": "reading", "rating": 5},
                 headers=headers,
@@ -298,6 +316,21 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(client.get(shared_path, headers=headers).json()["items"][0]["tier"], "C")
             public = client.get("/shared-collections").json()["collections"]
             self.assertEqual([book["novel_id"] for book in public[0]["books"]], [7])
+            reader_id = account.json()["user"]["id"]
+            for number in (10, 11):
+                collection.save_item(reader_id, {**novel, "id": number}, "reading", tier="A")
+            shared_items = f"{shared_path}/items"
+            self.assertEqual(client.post(shared_items, json={"novel_ids": [10, 8]}, headers=headers).status_code, 404)
+            self.assertEqual([book["novel_id"] for book in client.get(shared_path, headers=headers).json()["items"]], [7])
+            added = client.post(shared_items, json={"novel_ids": [10, 11, 10]}, headers=headers)
+            self.assertEqual(added.json()["added"], 2)
+            self.assertEqual(client.put(f"{shared_items}/10/move", json={"tier": "S", "ordered_novel_ids": [10]}, headers=headers).status_code, 200)
+            self.assertEqual(client.post(shared_items, json={"novel_ids": [10, 11]}, headers=headers).json()["added"], 0)
+            shared_books = client.get(shared_path, headers=headers).json()["items"]
+            self.assertEqual({book["novel_id"]: book["tier"] for book in shared_books}, {7: "C", 10: "S", 11: "A"})
+            self.assertEqual([book["novel_id"] for book in client.get(shared_path).json()["items"]], [7])
+            for number in (10, 11):
+                self.assertEqual(client.delete(f"/collection/{number}", headers=headers).status_code, 204)
             for body in ("First public comment", "Latest public comment"):
                 reply = client.post(f"{shared_path}/comments", json={"body": body}, headers=headers)
                 self.assertEqual(reply.status_code, 200)
@@ -403,7 +436,7 @@ class CoreTests(unittest.TestCase):
                 self.assertEqual([item["novel_id"] for item in
                                   client.get("/profiles/reader").json()["favorites"]], [30])
                 self.assertEqual(len(client.get("/profiles/reader", headers=headers).json()["favorites"]), 2)
-            with patch.object(main, "get_shared_collection", side_effect=lambda *_: {"items": list(public_items)}):
+            with patch.object(main, "get_shared_collection", side_effect=lambda *_: {"user_id": 1, "items": list(public_items)}):
                 self.assertEqual([item["novel_id"] for item in
                                   client.get("/shared-collections/1").json()["items"]], [30])
                 self.assertEqual(len(client.get("/shared-collections/1", headers=headers).json()["items"]), 2)
